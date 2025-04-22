@@ -1,8 +1,7 @@
 use crate::config::ClickhouseExporterConfig;
 use crate::error::ClickhouseExporterError;
-use clickhouse::{Client, Row}; // Use Client, not Pool. Added Row for Nested types
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use clickhouse::{Client, Row}; // Use Client, not Pool. Added Row for Nested types
 
 // --- SQL Schema Definitions ---
 // NOTE: Carefully review and adjust types (DateTime64 precision, String vs FixedString/UUID, Map types)
@@ -16,7 +15,7 @@ pub(crate) struct EventRow {
     #[serde(rename = "Events.Name")]
     pub name: String,
     #[serde(rename = "Events.Attributes")]
-    pub attributes: HashMap<String, String>,
+    pub attributes: Vec<(String, String)>,
 }
 
 #[derive(Row, Debug, Clone, serde::Serialize)]
@@ -28,7 +27,7 @@ pub(crate) struct LinkRow {
     #[serde(rename = "Links.TraceState")]
     pub trace_state: String,
     #[serde(rename = "Links.Attributes")]
-    pub attributes: HashMap<String, String>,
+    pub attributes: Vec<(String, String)>,
 }
 
 fn get_spans_schema(table_name: &str) -> String {
@@ -95,15 +94,15 @@ pub(crate) async fn ensure_schema(
     // let attributes_sql = get_attributes_schema(&config.attributes_table_name); // If using flattened attrs
 
     // Execute schema creation queries sequentially using the passed client
-    client
-        .query(&spans_sql)
-        .execute()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create/check spans table '{}': {}", config.spans_table_name, e);
-            // Assuming ClickhouseError can represent schema errors too - Use ClickhouseClientError variant
-            ClickhouseExporterError::ClickhouseClientError(e)
-        })?;
+    client.query(&spans_sql).execute().await.map_err(|e| {
+        tracing::error!(
+            "Failed to create/check spans table '{}': {}",
+            config.spans_table_name,
+            e
+        );
+        // Assuming ClickhouseError can represent schema errors too - Use ClickhouseClientError variant
+        ClickhouseExporterError::ClickhouseClientError(e)
+    })?;
     tracing::info!("Checked/Created table: {}", config.spans_table_name);
 
     // if config.use_flattened_attributes { // Example condition

@@ -1,10 +1,9 @@
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use opentelemetry::{
-    trace::{SpanKind, Status},
     KeyValue, Value,
+    trace::{SpanKind, Status},
 };
 use opentelemetry_sdk::trace::{SpanEvents, SpanLinks};
-use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Import the structs defined in schema.rs for Nested types
@@ -60,9 +59,10 @@ pub(crate) fn value_to_string(value: &Value) -> String {
     }
 }
 
-pub(crate) fn attributes_to_map<'a>(
+/// Converts attribute key-value pairs into a Vec<(String, String)> for ClickHouse Map types
+pub(crate) fn attributes_to_vec<'a>(
     attrs: impl IntoIterator<Item = &'a KeyValue>,
-) -> HashMap<String, String> {
+) -> Vec<(String, String)> {
     attrs
         .into_iter()
         .map(|kv| (kv.key.to_string(), value_to_string(&kv.value)))
@@ -78,7 +78,7 @@ pub(crate) fn convert_events(events: &SpanEvents) -> Vec<EventRow> {
         .map(|event| EventRow {
             timestamp: system_time_to_utc(event.timestamp),
             name: event.name.to_string(),
-            attributes: attributes_to_map(&event.attributes),
+            attributes: attributes_to_vec(&event.attributes),
         })
         .collect()
 }
@@ -91,7 +91,7 @@ pub(crate) fn convert_links(links: &SpanLinks) -> Vec<LinkRow> {
             trace_id: link.span_context.trace_id().to_string(),
             span_id: link.span_context.span_id().to_string(),
             trace_state: link.span_context.trace_state().header().to_string(),
-            attributes: attributes_to_map(&link.attributes),
+            attributes: attributes_to_vec(&link.attributes),
         })
         .collect()
 }

@@ -1,7 +1,7 @@
 use crate::config::ClickhouseExporterConfig;
 use crate::error::ClickhouseExporterError;
 use crate::model::{
-    attributes_to_map,
+    attributes_to_vec,
     convert_events,
     convert_links,
     duration_to_nanos,
@@ -26,7 +26,6 @@ use opentelemetry_sdk::{
     trace::{SpanData, SpanExporter},
 };
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME; // Import SERVICE_NAME
-use std::collections::HashMap;
 use std::fmt; // Import fmt for manual Debug impl
 
 // Define a struct that derives `Row` for insertion
@@ -51,13 +50,13 @@ struct SpanRow {
     #[serde(rename = "ServiceName")]
     service_name: String,
     #[serde(rename = "ResourceAttributes")]
-    resource_attributes: HashMap<String, String>,
+    resource_attributes: Vec<(String, String)>,
     #[serde(rename = "ScopeName")]
     scope_name: String,
     #[serde(rename = "ScopeVersion")]
     scope_version: String,
     #[serde(rename = "SpanAttributes")]
-    span_attributes: HashMap<String, String>,
+    span_attributes: Vec<(String, String)>,
     #[serde(rename = "Duration")]
     duration: u64,
     #[serde(rename = "StatusCode")]
@@ -124,14 +123,17 @@ impl ClickhouseExporter {
                     if value == "lz4" {
                         client = client.with_compression(Compression::Lz4);
                     }
+                    // Add other compression types if needed
                 }
-                "secure" => {
-                    if value == "true" {
-                        client = client.with_option("secure", "true");
-                    }
-                }
+                // REMOVE this "secure" match arm entirely.
+                // "secure" => {
+                //     if value == "true" {
+                //         // This is incorrect for HTTP/HTTPS, TLS is based on URL scheme
+                //         // client = client.with_option("secure", "true"); // REMOVE THIS LINE
+                //     }
+                // }
                 _ => {
-                    // Pass through any other options
+                    // Pass through any other options (like database, timeouts etc. if added)
                     client = client.with_option(key.as_ref(), value.as_ref());
                 }
             }
@@ -200,8 +202,8 @@ impl SpanExporter for ClickhouseExporter {
                 for span_data in &batch {
                     let scope = &span_data.instrumentation_scope;
 
-                    let resource_attrs = HashMap::new(); // Placeholder for resource attrs
-                    let span_attrs = attributes_to_map(&span_data.attributes);
+                    let resource_attrs: Vec<(String, String)> = Vec::new(); // Placeholder for resource attrs
+                    let span_attrs = attributes_to_vec(&span_data.attributes);
 
                     let events = convert_events(&span_data.events);
                     let links = convert_links(&span_data.links);
