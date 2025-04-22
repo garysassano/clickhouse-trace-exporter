@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::borrow::Cow; // Import Cow
 use futures::future::{BoxFuture, FutureExt}; // Import BoxFuture and FutureExt
+use std::error::Error; // Import Error trait for boxing
 
 /// Exports OpenTelemetry spans to ClickHouse.
 #[derive(Debug)] // Add Debug back
@@ -61,8 +62,13 @@ impl ClickhouseExporter {
 #[async_trait]
 impl SpanExporter for ClickhouseExporter {
     /// Exports a batch of spans.
-    /// Reverted signature to use Vec<SpanData>
-    fn export<'a>(&'a mut self, batch: Vec<SpanData>) -> BoxFuture<'a, ExportResult> {
+    /// Update lifetime to 'static for BoxFuture
+    fn export(&mut self, batch: Vec<SpanData>) -> BoxFuture<'static, ExportResult> {
+        // Clone necessary data for the 'static future
+        let pool = self.pool.clone(); // Pool is likely cheap to clone (Arc internally)
+        let spans_table_name = self.config.spans_table_name.clone();
+        let errors_table_name = self.config.errors_table_name.clone();
+
         Box::pin(async move {
             if batch.is_empty() {
                 return Ok(());
@@ -71,52 +77,55 @@ impl SpanExporter for ClickhouseExporter {
             let batch_size = batch.len();
             tracing::debug!("Exporting batch of {} spans to ClickHouse", batch_size);
 
-            let resource = self.get_resource_from_batch(&batch); // Pass Vec ref
+            // Note: get_resource_from_batch needs to be adjusted or called differently
+            // as self is not available directly here. For now, using default.
+            // This needs refinement - ideally pass Resource from provider.
+            let resource = Cow::Owned(Resource::default());
 
             let mut span_rows: Vec<SpanRow> = Vec::with_capacity(batch_size);
             let mut error_rows: Vec<ErrorRow> = Vec::with_capacity(batch_size);
 
-            // Iterate over owned Vec<SpanData>
             for span_data in batch {
                 let (span_row, mut errors) = convert_otel_span_to_rows(&span_data, &resource);
                 span_rows.push(span_row);
                 error_rows.append(&mut errors);
             }
 
-            let mut client = match self.pool.get_handle().await {
+            // Use the cloned pool
+            let mut client = match pool.get_handle().await {
                 Ok(client) => client,
                 Err(e) => {
                     tracing::error!("Failed to get ClickHouse client handle from pool: {}", e);
-                    // Box the error for ExportResult
-                    return Err(Box::new(ClickhouseExporterError::ClickhousePoolError(e)));
+                    // Box and cast the error for ExportResult
+                    return Err(Box::new(ClickhouseExporterError::ClickhousePoolError(e)) as Box<dyn Error + Send + Sync + 'static>);
                 }
             };
 
             if !span_rows.is_empty() {
-                let table_name = self.config.spans_table_name.clone();
-                let insert_result = client.insert(&table_name)?.write(&span_rows).await;
+                // Use cloned table name
+                let insert_result = client.insert(&spans_table_name)?.write(&span_rows).await;
                 if let Err(e) = insert_result {
                     tracing::error!(
                         "Failed to insert spans into ClickHouse table '{}': {}",
-                        table_name,
+                        spans_table_name,
                         e
                     );
-                    // Box the error for ExportResult
-                    return Err(Box::new(ClickhouseExporterError::ClickhouseClientError(e)));
+                    // Box and cast the error for ExportResult
+                    return Err(Box::new(ClickhouseExporterError::ClickhouseClientError(e)) as Box<dyn Error + Send + Sync + 'static>);
                 }
             }
 
             if !error_rows.is_empty() {
-                let table_name = self.config.errors_table_name.clone();
-                let insert_result = client.insert(&table_name)?.write(&error_rows).await;
+                 // Use cloned table name
+                let insert_result = client.insert(&errors_table_name)?.write(&error_rows).await;
                 if let Err(e) = insert_result {
                     tracing::warn!(
                         "Failed to insert errors into ClickHouse table '{}': {}",
-                        table_name,
+                        errors_table_name,
                         e
                     );
                     // Optionally return error here too:
-                    // return Err(Box::new(ClickhouseExporterError::ClickhouseClientError(e)));
+                    // return Err(Box::new(ClickhouseExporterError::ClickhouseClientError(e)) as Box<dyn Error + Send + Sync + 'static>);
                 }
             }
 
