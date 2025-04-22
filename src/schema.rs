@@ -1,7 +1,6 @@
 use crate::config::ClickhouseExporterConfig;
 use crate::error::ClickhouseExporterError;
 use clickhouse::{Client, Row}; // Use Client, not Pool. Added Row for Nested types
-use clickhouse::error::Error as ClickhouseError;
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 
@@ -13,23 +12,23 @@ use chrono::{DateTime, Utc};
 #[derive(Row, Debug, Clone, serde::Serialize)]
 pub(crate) struct EventRow {
     #[serde(rename = "Events.Timestamp")]
-    timestamp: DateTime<Utc>,
+    pub timestamp: DateTime<Utc>,
     #[serde(rename = "Events.Name")]
-    name: String,
+    pub name: String,
     #[serde(rename = "Events.Attributes")]
-    attributes: HashMap<String, String>,
+    pub attributes: HashMap<String, String>,
 }
 
 #[derive(Row, Debug, Clone, serde::Serialize)]
 pub(crate) struct LinkRow {
     #[serde(rename = "Links.TraceId")]
-    trace_id: String,
+    pub trace_id: String,
     #[serde(rename = "Links.SpanId")]
-    span_id: String,
+    pub span_id: String,
     #[serde(rename = "Links.TraceState")]
-    trace_state: String,
+    pub trace_state: String,
     #[serde(rename = "Links.Attributes")]
-    attributes: HashMap<String, String>,
+    pub attributes: HashMap<String, String>,
 }
 
 fn get_spans_schema(table_name: &str) -> String {
@@ -83,7 +82,7 @@ fn get_spans_schema(table_name: &str) -> String {
 
 /// Executes `CREATE TABLE IF NOT EXISTS` statements if config.create_schema is true.
 pub(crate) async fn ensure_schema(
-    client: &Client, // Changed from pool: &Pool
+    client: &Client,
     config: &ClickhouseExporterConfig,
 ) -> Result<(), ClickhouseExporterError> {
     if !config.create_schema {
@@ -102,8 +101,8 @@ pub(crate) async fn ensure_schema(
         .await
         .map_err(|e| {
             tracing::error!("Failed to create/check spans table '{}': {}", config.spans_table_name, e);
-            // Assuming ClickhouseError can represent schema errors too
-            ClickhouseExporterError::SchemaCreationError(e)
+            // Assuming ClickhouseError can represent schema errors too - Use ClickhouseClientError variant
+            ClickhouseExporterError::ClickhouseClientError(e)
         })?;
     tracing::info!("Checked/Created table: {}", config.spans_table_name);
 

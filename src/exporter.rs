@@ -19,33 +19,49 @@ use futures::future::{BoxFuture};
 use std::error::Error;
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use std::fmt; // Import fmt for manual Debug impl
 
 // Define a struct that derives `Row` for insertion
 // Ensure field names match the SQL insert columns exactly
 #[derive(clickhouse::Row, Clone, serde::Serialize)] // Removed Debug derive, Added Clone
-struct SpanRow<'a> { // Use lifetime for borrowed strings where possible
+struct SpanRow { // Removed lifetime 'a
     #[serde(rename = "Timestamp")] timestamp: DateTime<Utc>,
-    #[serde(rename = "TraceId")] trace_id: &'a str, // Use &str for efficiency
-    #[serde(rename = "SpanId")] span_id: &'a str,   // Use &str for efficiency
-    #[serde(rename = "ParentSpanId")] parent_span_id: String, // Needs to be String if potentially empty/default
+    #[serde(rename = "TraceId")] trace_id: String, // Changed to owned String
+    #[serde(rename = "SpanId")] span_id: String,   // Changed to owned String
+    #[serde(rename = "ParentSpanId")] parent_span_id: String,
     #[serde(rename = "TraceState")] trace_state: String,
-    #[serde(rename = "SpanName")] span_name: String, // Convert Cow<str> to String
+    #[serde(rename = "SpanName")] span_name: String,
     #[serde(rename = "SpanKind")] span_kind: String,
     #[serde(rename = "ServiceName")] service_name: String,
     #[serde(rename = "ResourceAttributes")] resource_attributes: HashMap<String, String>,
     #[serde(rename = "ScopeName")] scope_name: String,
     #[serde(rename = "ScopeVersion")] scope_version: String,
     #[serde(rename = "SpanAttributes")] span_attributes: HashMap<String, String>,
-    #[serde(rename = "Duration")] duration: u64, // Changed to u64
+    #[serde(rename = "Duration")] duration: u64,
     #[serde(rename = "StatusCode")] status_code: String,
     #[serde(rename = "StatusMessage")] status_message: String,
     #[serde(rename = "Events")] events: Vec<crate::schema::EventRow>,
     #[serde(rename = "Links")] links: Vec<crate::schema::LinkRow>,
 }
 
+// Add manual Debug impl because clickhouse::Client doesn't implement it
 pub struct ClickhouseExporter {
-    client: Client, // Use Client
+    // Client is likely not thread-safe for cloning and using across async tasks
+    // depending on the underlying HTTP client used by clickhouse-rs.
+    // Consider Arc<Client> or a connection pool (like bb8/deadpool) for robustness.
+    // For now, cloning works with default reqwest client, but beware.
+    client: Client,
     config: ClickhouseExporterConfig,
+}
+
+// Manual Debug impl
+impl fmt::Debug for ClickhouseExporter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClickhouseExporter")
+         .field("client", &"<Clickhouse Client>") // Placeholder for non-Debug client
+         .field("config", &self.config)
+         .finish()
+    }
 }
 
 impl ClickhouseExporter {
@@ -56,11 +72,11 @@ impl ClickhouseExporter {
             config.create_schema
         );
 
-        // Create client directly from DSN string
-        let client = Client::new(config.dsn.as_str());
+        // Create client using default and configuring with URL (suitable for clickhouse v0.13.x)
+        let client = Client::default().with_url(config.dsn.as_str());
 
-        // Ping to verify connection
-        client.ping().await.map_err(ClickhouseExporterError::ClickhouseClientError)?;
+        // Verify connection by executing a simple query
+        client.query("SELECT 1").execute().await.map_err(ClickhouseExporterError::ClickhouseClientError)?;
         tracing::debug!("Successfully connected to ClickHouse.");
 
         if config.create_schema {
@@ -74,7 +90,8 @@ impl ClickhouseExporter {
 #[async_trait]
 impl SpanExporter for ClickhouseExporter {
     fn export(&mut self, batch: Vec<SpanData>) -> BoxFuture<'static, ExportResult> {
-        // Clone data needed for the static future
+        // Clone client for the async block.
+        // WARNING: See note on ClickhouseExporter struct about client cloning.
         let client = self.client.clone();
         let table_name = self.config.spans_table_name.clone();
 
@@ -113,15 +130,11 @@ impl SpanExporter for ClickhouseExporter {
                     .map(duration_to_nanos)
                     .unwrap_or(0);
 
-                // Convert trace/span IDs to strings once
-                let trace_id_str = span_data.span_context.trace_id().to_string();
-                let span_id_str = span_data.span_context.span_id().to_string();
-
                 // Construct the row struct for insertion
                 let row = SpanRow {
                     timestamp: system_time_to_utc(span_data.start_time),
-                    trace_id: &trace_id_str, // Borrow string slice
-                    span_id: &span_id_str,   // Borrow string slice
+                    trace_id: span_data.span_context.trace_id().to_string(), // Move owned String
+                    span_id: span_data.span_context.span_id().to_string(),   // Move owned String
                     parent_span_id: span_data.parent_span_id.to_string(),
                     trace_state: span_data.span_context.trace_state().header().to_string(),
                     span_name: span_data.name.to_string(), // Convert Cow -> String
@@ -129,7 +142,7 @@ impl SpanExporter for ClickhouseExporter {
                     service_name,
                     resource_attributes: resource_attrs,
                     scope_name: scope.name.to_string(),
-                    scope_version: scope.version.map_or("".to_string(), |v| v.to_string()),
+                    scope_version: scope.version.as_deref().map_or("", |v| v).to_string(),
                     span_attributes: span_attrs,
                     duration: duration_ns,
                     status_code: status_code_to_string(&span_data.status),
@@ -142,7 +155,7 @@ impl SpanExporter for ClickhouseExporter {
                 insert.write(&row).await.map_err(|e| {
                     tracing::error!(
                         "Failed preparing span {} for ClickHouse batch insert: {}",
-                        span_id_str,
+                        row.span_id, // Use row.span_id now it's owned
                         e
                     );
                     Box::new(ClickhouseExporterError::ClickhouseClientError(e)) as Box<dyn Error + Send + Sync + 'static>

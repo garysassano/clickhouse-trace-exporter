@@ -1,15 +1,14 @@
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use opentelemetry::{
-    trace::{Event as SpanEvent, Link, SpanKind, Status},
-    Key, KeyValue, Value,
+    trace::{SpanKind, Status},
+    KeyValue, Value,
 };
-use opentelemetry_sdk::{export::trace::SpanLinks, Resource};
-use opentelemetry_semantic_conventions::{resource, trace};
-use serde::Serialize;
-use std::borrow::Cow;
+use opentelemetry_sdk::{
+    trace::{SpanEvents, SpanLinks},
+    Resource,
+};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
 // Import the structs defined in schema.rs for Nested types
 use crate::schema::{EventRow, LinkRow};
@@ -72,15 +71,16 @@ pub(crate) fn attributes_to_map<'a>(
 }
 
 pub(crate) fn get_service_name(resource: &Resource) -> String {
+    use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
     resource
-        .get(resource::SERVICE_NAME.into())
+        .get(SERVICE_NAME.into())
         .map_or_else(|| "unknown_service".to_string(), |v| value_to_string(&v))
 }
 
 // --- Updated Helper Functions for Nested Types ---
 
 // Converts OTel events into a Vec of EventRow for ClickHouse Nested columns
-pub(crate) fn convert_events(events: &Cow<'_, [SpanEvent]>) -> Vec<EventRow> {
+pub(crate) fn convert_events(events: &SpanEvents) -> Vec<EventRow> {
     events
         .iter()
         .map(|event| EventRow {
