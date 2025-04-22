@@ -1,8 +1,6 @@
 //! Basic exporter example
-use opentelemetry::{
-    Context, KeyValue, global,
-    trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider},
-};
+use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider};
+use opentelemetry::{KeyValue, global};
 use opentelemetry_clickhouse_exporter::{
     ClickhouseExporter, ClickhouseExporterConfig, model::span_kind_to_string,
 };
