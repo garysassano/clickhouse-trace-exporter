@@ -30,11 +30,15 @@ pub(crate) struct LinkRow {
     pub attributes: Vec<(String, String)>,
 }
 
-fn get_spans_schema(table_name: &str) -> String {
+fn get_spans_schema(table_name: &str, config: &ClickhouseExporterConfig) -> String {
+    // Build ON CLUSTER, ENGINE, and TTL clauses
+    let cluster = config.cluster_string();
+    let engine = config.table_engine_string();
+    let ttl = config.ttl_expr("toDateTime(Timestamp)");
     format!(
         r#"
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            Timestamp DateTime64(9, 'UTC') CODEC(Delta(8), ZSTD(1)), -- Explicit UTC, added Codec
+        CREATE TABLE IF NOT EXISTS {table_name} {cluster} (
+            Timestamp DateTime64(9) CODEC(Delta, ZSTD(1)), -- Use Delta codec as in Go exporter
             TraceId String CODEC(ZSTD(1)),               -- Consider FixedString(32) or UUID. Added Codec
             SpanId String CODEC(ZSTD(1)),                -- Consider FixedString(16). Added Codec
             ParentSpanId String CODEC(ZSTD(1)),          -- Consider FixedString(16). Added Codec
@@ -50,7 +54,7 @@ fn get_spans_schema(table_name: &str) -> String {
             StatusCode LowCardinality(String) CODEC(ZSTD(1)), -- Use LowCardinality. Added Codec
             StatusMessage String CODEC(ZSTD(1)),         -- Added Codec
             Events Nested (                         -- Use Nested type
-                Timestamp DateTime64(9, 'UTC'),
+                Timestamp DateTime64(9),
                 Name LowCardinality(String),
                 Attributes Map(LowCardinality(String), String)
             ) CODEC(ZSTD(1)),                        -- Added Codec for Nested
@@ -68,11 +72,16 @@ fn get_spans_schema(table_name: &str) -> String {
             INDEX idx_span_attr_value mapValues(SpanAttributes) TYPE bloom_filter(0.01) GRANULARITY 1, -- Added index on map values
             INDEX idx_svc_name ServiceName TYPE bloom_filter GRANULARITY 1, -- Kept this index
             INDEX idx_duration Duration TYPE minmax GRANULARITY 1 -- Kept this index
-        ) ENGINE = MergeTree()
+        ) ENGINE = {engine}
         PARTITION BY toDate(Timestamp) -- Match Go partitioning
-        ORDER BY (ServiceName, SpanName, toUnixTimestamp64Nano(Timestamp)) -- Match Go ordering (use nano for accuracy)
+        ORDER BY (ServiceName, SpanName, toDateTime(Timestamp)) -- Match Go exporter ordering
+        {ttl}
         SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1; -- Match Go settings
-        "#
+        "#,
+        table_name = table_name,
+        cluster = cluster,
+        engine = engine,
+        ttl = ttl
     )
 }
 
@@ -90,7 +99,7 @@ pub(crate) async fn ensure_schema(
     }
     tracing::info!("Ensuring ClickHouse schema exists...");
 
-    let spans_sql = get_spans_schema(&config.spans_table_name);
+    let spans_sql = get_spans_schema(&config.spans_table_name, config);
     // let attributes_sql = get_attributes_schema(&config.attributes_table_name); // If using flattened attrs
 
     // Execute schema creation queries sequentially using the passed client

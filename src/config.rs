@@ -1,4 +1,5 @@
 use crate::error::ClickhouseExporterError;
+use std::time::Duration;
 use url::Url;
 
 // Sensible defaults for table names
@@ -11,6 +12,10 @@ const DEFAULT_SPANS_TABLE: &str = "otel_spans";
 pub struct ClickhouseExporterConfig {
     pub(crate) dsn: Url,
     pub(crate) spans_table_name: String,
+    pub(crate) cluster_name: Option<String>,
+    pub(crate) table_engine: String,
+    pub(crate) table_engine_params: Option<String>,
+    pub(crate) ttl: Option<Duration>,
     // pub(crate) attributes_table_name: String, // Optional
     // pub(crate) errors_table_name: String, // Removed unused errors table
     pub(crate) create_schema: bool,
@@ -32,6 +37,10 @@ impl ClickhouseExporterConfig {
         Ok(ClickhouseExporterConfig {
             dsn: parsed_dsn,
             spans_table_name: DEFAULT_SPANS_TABLE.to_string(),
+            cluster_name: None,
+            table_engine: "MergeTree".to_string(),
+            table_engine_params: None,
+            ttl: None,
             // attributes_table_name: DEFAULT_ATTRIBUTES_TABLE.to_string(), // Optional
             // errors_table_name: DEFAULT_ERRORS_TABLE.to_string(), // Removed unused errors table
             create_schema: false, // Default to not creating schema
@@ -41,6 +50,29 @@ impl ClickhouseExporterConfig {
     /// Sets the name for the main spans table.
     pub fn with_spans_table(mut self, name: impl Into<String>) -> Self {
         self.spans_table_name = name.into();
+        self
+    }
+
+    /// Sets the cluster name for ON CLUSTER clause when creating tables.
+    pub fn with_cluster(mut self, name: impl Into<String>) -> Self {
+        self.cluster_name = Some(name.into());
+        self
+    }
+
+    /// Sets the ClickHouse table engine and its parameters.
+    pub fn with_table_engine(
+        mut self,
+        engine: impl Into<String>,
+        params: impl Into<String>,
+    ) -> Self {
+        self.table_engine = engine.into();
+        self.table_engine_params = Some(params.into());
+        self
+    }
+
+    /// Sets a TTL duration for the spans table.
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
         self
     }
 
@@ -56,5 +88,32 @@ impl ClickhouseExporterConfig {
     pub fn with_schema_creation(mut self, create: bool) -> Self {
         self.create_schema = create;
         self
+    }
+
+    /// Returns the ON CLUSTER clause or empty if none.
+    pub fn cluster_string(&self) -> String {
+        if let Some(ref c) = self.cluster_name {
+            format!("ON CLUSTER {}", c)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Returns the full table engine string (e.g. `MergeTree()` or `ModEngine(param)`).
+    pub fn table_engine_string(&self) -> String {
+        if let Some(ref params) = self.table_engine_params {
+            format!("{}({})", self.table_engine, params)
+        } else {
+            format!("{}()", self.table_engine)
+        }
+    }
+
+    /// Generates a TTL expression or empty string if no TTL is set.
+    pub fn ttl_expr(&self, ts_expr: &str) -> String {
+        if let Some(ttl) = self.ttl {
+            format!("TTL {} + INTERVAL {} SECOND", ts_expr, ttl.as_secs())
+        } else {
+            String::new()
+        }
     }
 }
