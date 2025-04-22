@@ -1,5 +1,3 @@
-use opentelemetry::trace::TraceError;
-use opentelemetry_sdk::export::ExportError;
 use thiserror::Error;
 
 // Use correct crate name: clickhouse
@@ -12,9 +10,6 @@ pub enum ClickhouseExporterError {
 
     #[error("ClickHouse client error: {0}")]
     ClickhouseClientError(ClickhouseError),
-
-    #[error("ClickHouse pool error: {0}")]
-    ClickhousePoolError(#[from] ClickhouseError),
 
     #[error("Schema creation failed: {0}")]
     SchemaCreationError(ClickhouseError),

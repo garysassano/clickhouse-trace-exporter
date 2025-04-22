@@ -7,58 +7,45 @@ use crate::model::{ // Import necessary utils and helpers
 };
 use crate::schema;
 use async_trait::async_trait;
-use clickhouse::{Client, ClientOptions, Row}; // Use Client and ClientOptions. Row needed for params macro.
+use clickhouse::Client;
 use opentelemetry::{
-    trace::{Status, SpanKind, Link}, 
-    KeyValue, Value
+    trace::Status,
+    KeyValue
 };
 use opentelemetry_sdk::{
     export::trace::{ExportResult, SpanData, SpanExporter},
-    Resource
 };
 use futures::future::{BoxFuture};
 use std::error::Error;
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 
-// SQL Template for insertion
-const INSERT_TRACES_SQL: &str = r#"
-INSERT INTO {table_name} (
-    Timestamp,
-    TraceId,
-    SpanId,
-    ParentSpanId,
-    TraceState,
-    SpanName,
-    SpanKind,
-    ServiceName,
-    ResourceAttributes,
-    ScopeName,
-    ScopeVersion,
-    SpanAttributes,
-    Duration,
-    StatusCode,
-    StatusMessage,
-    `Events.Timestamp`,
-    `Events.Name`,
-    `Events.Attributes`,
-    `Links.TraceId`,
-    `Links.SpanId`,
-    `Links.TraceState`,
-    `Links.Attributes`
-) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-    ?, ?
-)
-"#;
+// Define a struct that derives `Row` for insertion
+// Ensure field names match the SQL insert columns exactly
+#[derive(clickhouse::Row, Clone, serde::Serialize)] // Removed Debug derive, Added Clone
+struct SpanRow<'a> { // Use lifetime for borrowed strings where possible
+    #[serde(rename = "Timestamp")] timestamp: DateTime<Utc>,
+    #[serde(rename = "TraceId")] trace_id: &'a str, // Use &str for efficiency
+    #[serde(rename = "SpanId")] span_id: &'a str,   // Use &str for efficiency
+    #[serde(rename = "ParentSpanId")] parent_span_id: String, // Needs to be String if potentially empty/default
+    #[serde(rename = "TraceState")] trace_state: String,
+    #[serde(rename = "SpanName")] span_name: String, // Convert Cow<str> to String
+    #[serde(rename = "SpanKind")] span_kind: String,
+    #[serde(rename = "ServiceName")] service_name: String,
+    #[serde(rename = "ResourceAttributes")] resource_attributes: HashMap<String, String>,
+    #[serde(rename = "ScopeName")] scope_name: String,
+    #[serde(rename = "ScopeVersion")] scope_version: String,
+    #[serde(rename = "SpanAttributes")] span_attributes: HashMap<String, String>,
+    #[serde(rename = "Duration")] duration: u64, // Changed to u64
+    #[serde(rename = "StatusCode")] status_code: String,
+    #[serde(rename = "StatusMessage")] status_message: String,
+    #[serde(rename = "Events")] events: Vec<crate::schema::EventRow>,
+    #[serde(rename = "Links")] links: Vec<crate::schema::LinkRow>,
+}
 
-
-#[derive(Debug)]
 pub struct ClickhouseExporter {
     client: Client, // Use Client
     config: ClickhouseExporterConfig,
-    insert_sql: String, // Store rendered insert SQL
 }
 
 impl ClickhouseExporter {
@@ -69,31 +56,18 @@ impl ClickhouseExporter {
             config.create_schema
         );
 
-        // Use Client::new and potentially ClientOptions if needed
-        let options = ClientOptions::default(); // Add options like user/pass if needed
+        // Create client directly from DSN string
         let client = Client::new(config.dsn.as_str());
-        // Handle authentication if configured
-        let client = if let Some(user) = &config.username {
-            client.with_user(user.clone())
-        } else { client };
-        let client = if let Some(pass) = &config.password {
-            client.with_password(pass.clone())
-        } else { client };
-        // Apply other options from config or DSN?
-        // let client = client.with_options(options);
 
-        // Ping to verify connection?
-        client.ping().await?; // Assuming ping exists and is async
+        // Ping to verify connection
+        client.ping().await.map_err(ClickhouseExporterError::ClickhouseClientError)?;
         tracing::debug!("Successfully connected to ClickHouse.");
 
         if config.create_schema {
             schema::ensure_schema(&client, &config).await?;
         }
 
-        // Render the INSERT SQL template with the actual table name
-        let insert_sql = INSERT_TRACES_SQL.replace("{table_name}", &config.spans_table_name);
-
-        Ok(ClickhouseExporter { client, config, insert_sql })
+        Ok(ClickhouseExporter { client, config })
     }
 }
 
@@ -102,28 +76,31 @@ impl SpanExporter for ClickhouseExporter {
     fn export(&mut self, batch: Vec<SpanData>) -> BoxFuture<'static, ExportResult> {
         // Clone data needed for the static future
         let client = self.client.clone();
-        let insert_sql = self.insert_sql.clone();
+        let table_name = self.config.spans_table_name.clone();
 
         Box::pin(async move {
             if batch.is_empty() {
                 return Ok(());
             }
             let batch_size = batch.len(); // For logging
+            let start_time = std::time::Instant::now(); // For timing
 
-            // Note: The Go exporter uses a transaction per batch.
-            // clickhouse crate v0.13 doesn't expose simple transaction begin/commit.
-            // Inserts will be per-span.
+            // Use `client.insert` for batch insertion which handles transactions implicitly.
+            let mut insert = client.insert(&table_name).map_err(|e| {
+                Box::new(ClickhouseExporterError::ClickhouseClientError(e)) as Box<dyn Error + Send + Sync + 'static>
+            })?;
 
-            for span_data in batch {
+            for span_data in &batch { // Borrow batch
                 let resource = &span_data.resource;
                 let scope = &span_data.instrumentation_lib;
 
                 let service_name = get_service_name(resource);
-                let resource_attrs = attributes_to_map(resource.iter().map(|(k,v)| KeyValue::new(k.clone(), v.clone())).collect::<Vec<_>>().iter());
+                let resource_attrs = attributes_to_map(resource.iter().map(|(k, v)| KeyValue::new(k.clone(), v.clone())).collect::<Vec<_>>().iter());
                 let span_attrs = attributes_to_map(&span_data.attributes);
 
-                let (event_times, event_names, event_attrs) = convert_events(&span_data.events);
-                let (link_trace_ids, link_span_ids, link_trace_states, link_attrs) = convert_links(&span_data.links);
+                // Use updated model functions for Nested types
+                let events = convert_events(&span_data.events);
+                let links = convert_links(&span_data.links);
 
                 let status_message = match &span_data.status {
                     Status::Error { description } => description.to_string(),
@@ -136,47 +113,54 @@ impl SpanExporter for ClickhouseExporter {
                     .map(duration_to_nanos)
                     .unwrap_or(0);
 
-                // Construct a Row dynamically for insertion
-                // Order MUST match VALUES (?, ...) placeholders
-                let row = Row!{
-                    system_time_to_utc(span_data.start_time),                  // Timestamp
-                    span_data.span_context.trace_id().to_string(),            // TraceId
-                    span_data.span_context.span_id().to_string(),             // SpanId
-                    span_data.parent_span_id.to_string(),                     // ParentSpanId
-                    span_data.span_context.trace_state().header().to_string(), // TraceState
-                    span_data.name.to_string(),                               // SpanName
-                    span_kind_to_string(&span_data.span_kind),                // SpanKind
-                    service_name,                                             // ServiceName
-                    resource_attrs,                                           // ResourceAttributes (HashMap)
-                    scope.name.to_string(),                                   // ScopeName
-                    scope.version.map_or("".to_string(), |v| v.to_string()),  // ScopeVersion
-                    span_attrs,                                               // SpanAttributes (HashMap)
-                    duration_ns,                                              // Duration (i64)
-                    status_code_to_string(&span_data.status),                 // StatusCode
-                    status_message,                                           // StatusMessage
-                    event_times,                                              // Events.Timestamp (Vec<DateTime>)
-                    event_names,                                              // Events.Name (Vec<String>)
-                    event_attrs,                                              // Events.Attributes (Vec<HashMap>)
-                    link_trace_ids,                                           // Links.TraceId (Vec<String>)
-                    link_span_ids,                                            // Links.SpanId (Vec<String>)
-                    link_trace_states,                                        // Links.TraceState (Vec<String>)
-                    link_attrs                                                // Links.Attributes (Vec<HashMap>)
+                // Convert trace/span IDs to strings once
+                let trace_id_str = span_data.span_context.trace_id().to_string();
+                let span_id_str = span_data.span_context.span_id().to_string();
+
+                // Construct the row struct for insertion
+                let row = SpanRow {
+                    timestamp: system_time_to_utc(span_data.start_time),
+                    trace_id: &trace_id_str, // Borrow string slice
+                    span_id: &span_id_str,   // Borrow string slice
+                    parent_span_id: span_data.parent_span_id.to_string(),
+                    trace_state: span_data.span_context.trace_state().header().to_string(),
+                    span_name: span_data.name.to_string(), // Convert Cow -> String
+                    span_kind: span_kind_to_string(&span_data.span_kind),
+                    service_name,
+                    resource_attributes: resource_attrs,
+                    scope_name: scope.name.to_string(),
+                    scope_version: scope.version.map_or("".to_string(), |v| v.to_string()),
+                    span_attributes: span_attrs,
+                    duration: duration_ns,
+                    status_code: status_code_to_string(&span_data.status),
+                    status_message,
+                    events,
+                    links,
                 };
 
-                // Execute INSERT for each span using execute (not insert+write)
-                let result = client.execute(&insert_sql, row).await;
-
-                if let Err(e) = result {
+                // Write the row to the insert batch
+                insert.write(&row).await.map_err(|e| {
                     tracing::error!(
-                        "Failed to insert span {} into ClickHouse: {}",
-                        span_data.span_context.span_id(),
+                        "Failed preparing span {} for ClickHouse batch insert: {}",
+                        span_id_str,
                         e
                     );
-                    return Err(Box::new(ClickhouseExporterError::ClickhouseClientError(e)) as Box<dyn Error + Send + Sync + 'static>);
-                }
+                    Box::new(ClickhouseExporterError::ClickhouseClientError(e)) as Box<dyn Error + Send + Sync + 'static>
+                })?;
             }
 
-            tracing::debug!("Successfully processed {} spans for ClickHouse.", batch_size);
+            // Finalize the insert operation (sends the batch)
+            insert.end().await.map_err(|e| {
+                tracing::error!("Failed executing ClickHouse batch insert: {}", e);
+                Box::new(ClickhouseExporterError::ClickhouseClientError(e)) as Box<dyn Error + Send + Sync + 'static>
+            })?;
+
+            let elapsed = start_time.elapsed();
+            tracing::debug!(
+                "Successfully inserted {} spans into ClickHouse in {:.2?}",
+                batch_size,
+                elapsed
+            );
             Ok(())
         })
     }

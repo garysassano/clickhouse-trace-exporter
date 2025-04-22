@@ -1,16 +1,18 @@
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
-use clickhouse::Row;
 use opentelemetry::{
-    trace::{Link, SpanEvent, SpanKind, Status},
+    trace::{Event as SpanEvent, Link, SpanKind, Status},
     Key, KeyValue, Value,
 };
-use opentelemetry_sdk::{export::trace::SpanData, Resource};
+use opentelemetry_sdk::{export::trace::SpanLinks, Resource};
 use opentelemetry_semantic_conventions::{resource, trace};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+// Import the structs defined in schema.rs for Nested types
+use crate::schema::{EventRow, LinkRow};
 
 // --- Utility Functions ---
 
@@ -25,8 +27,9 @@ pub(crate) fn system_time_to_utc(st: SystemTime) -> DateTime<Utc> {
     }
 }
 
-pub(crate) fn duration_to_nanos(duration: Duration) -> i64 {
-    duration.as_nanos() as i64
+// Changed return type to u64 to match schema
+pub(crate) fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos() as u64
 }
 
 pub(crate) fn span_kind_to_string(kind: &SpanKind) -> String {
@@ -55,7 +58,7 @@ pub(crate) fn value_to_string(value: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::F64(f) => f.to_string(),
         Value::I64(i) => i.to_string(),
-        Value::Array(arr) => format!("{:?}", arr),
+        Value::Array(arr) => format!("{:?}", arr), // Basic array formatting
     }
 }
 
@@ -74,49 +77,31 @@ pub(crate) fn get_service_name(resource: &Resource) -> String {
         .map_or_else(|| "unknown_service".to_string(), |v| value_to_string(&v))
 }
 
-// --- New Helper Functions for Flattening ---
+// --- Updated Helper Functions for Nested Types ---
 
-// Converts OTel events into parallel arrays for ClickHouse Nested columns
-pub(crate) fn convert_events(
-    events: &Cow<'_, [SpanEvent]>,
-) -> (
-    Vec<DateTime<Utc>>,
-    Vec<String>,
-    Vec<HashMap<String, String>>,
-) {
-    let mut times = Vec::with_capacity(events.len());
-    let mut names = Vec::with_capacity(events.len());
-    let mut attrs = Vec::with_capacity(events.len());
-
-    for event in events.iter() {
-        times.push(system_time_to_utc(event.timestamp));
-        names.push(event.name.to_string());
-        attrs.push(attributes_to_map(&event.attributes));
-    }
-    (times, names, attrs)
+// Converts OTel events into a Vec of EventRow for ClickHouse Nested columns
+pub(crate) fn convert_events(events: &Cow<'_, [SpanEvent]>) -> Vec<EventRow> {
+    events
+        .iter()
+        .map(|event| EventRow {
+            timestamp: system_time_to_utc(event.timestamp),
+            name: event.name.to_string(),
+            attributes: attributes_to_map(&event.attributes),
+        })
+        .collect()
 }
 
-// Converts OTel links into parallel arrays for ClickHouse Nested columns
-pub(crate) fn convert_links(
-    links: &Cow<'_, [Link]>,
-) -> (
-    Vec<String>,
-    Vec<String>,
-    Vec<String>,
-    Vec<HashMap<String, String>>,
-) {
-    let mut trace_ids = Vec::with_capacity(links.len());
-    let mut span_ids = Vec::with_capacity(links.len());
-    let mut trace_states = Vec::with_capacity(links.len());
-    let mut attrs = Vec::with_capacity(links.len());
-
-    for link in links.iter() {
-        trace_ids.push(link.span_context.trace_id().to_string());
-        span_ids.push(link.span_context.span_id().to_string());
-        trace_states.push(link.span_context.trace_state().header().to_string());
-        attrs.push(attributes_to_map(&link.attributes));
-    }
-    (trace_ids, span_ids, trace_states, attrs)
+// Converts OTel links into a Vec of LinkRow for ClickHouse Nested columns
+pub(crate) fn convert_links(links: &SpanLinks) -> Vec<LinkRow> {
+    links
+        .iter()
+        .map(|link| LinkRow {
+            trace_id: link.span_context.trace_id().to_string(),
+            span_id: link.span_context.span_id().to_string(),
+            trace_state: link.span_context.trace_state().header().to_string(),
+            attributes: attributes_to_map(&link.attributes),
+        })
+        .collect()
 }
 
 // --- Removed Structs ---
