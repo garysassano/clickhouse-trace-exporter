@@ -1,127 +1,111 @@
+//! Basic exporter example
 use opentelemetry::{
-    KeyValue, global,
-    trace::{Span, SpanKind, Status, TraceContextExt, Tracer, TracerProvider as _},
+    global,
+    trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider}, // Removed Span, Added TracerProvider
+    KeyValue,
 };
-// Use the actual crate name here:
-use opentelemetry_clickhouse_exporter::{ClickhouseExporter, ClickhouseExporterConfig};
-use opentelemetry_sdk::{Resource, runtime, trace as sdktrace};
-use std::{env, error::Error, time::Duration};
-use tracing::info;
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use opentelemetry_sdk::{runtime, trace as sdktrace, Resource};
+use std::env;
+use std::time::Duration;
+use opentelemetry_clickhouse_exporter::{ClickhouseExporter, ClickhouseExporterConfig, model::span_kind_to_string};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
-    // Load .env file if available (useful for storing CLICKHOUSE_DSN)
-    dotenvy::dotenv().ok(); // Use dotenvy instead of dotenv
+// Import attribute::* for semantic conventions
+use opentelemetry_semantic_conventions::attribute;
 
-    // Setup tracing subscriber for logging output
-    tracing_subscriber::registry()
-        .with(fmt::layer().pretty()) // Pretty print logs
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,opentelemetry_clickhouse_exporter=debug".into()),
-        )
-        .init();
+fn init_tracer(config: ClickhouseExporterConfig) -> Result<sdktrace::Tracer, Box<dyn std::error::Error>> {
+    opentelemetry::global::set_text_map_propagator(opentelemetry_sdk::propagation::TraceContextPropagator::new());
 
-    info!("Starting ClickHouse exporter example...");
+    // Create the exporter asynchronously
+    let exporter = futures::executor::block_on(ClickhouseExporter::new(config))?;
 
-    // --- Configuration ---
-    let clickhouse_dsn = env::var("CLICKHOUSE_DSN")
-        .map_err(|_| "Environment variable CLICKHOUSE_DSN is not set".to_string())?; // Fail if not set
-    info!("Using ClickHouse DSN (host redacted)"); // Avoid logging full DSN in production
-
-    let exporter_config = ClickhouseExporterConfig::new(clickhouse_dsn)?
-        .with_schema_creation(true) // Ensure tables are created if they don't exist
-        .with_spans_table("otel_spans_example") // Use specific table names for the example
-        .with_errors_table("otel_span_errors_example");
-
-    // --- Initialize Exporter and Tracer Provider ---
-    info!("Initializing ClickHouse exporter...");
-    let exporter = ClickhouseExporter::new(exporter_config).await?;
-    info!("Exporter initialized.");
-
+    // Build a tracer provider with a batch processor using the async exporter
     let provider = sdktrace::TracerProvider::builder()
-        // Use a batch processor for better performance
-        .with_batch_exporter(exporter, runtime::Tokio)
-        // Define application resource attributes
+        .with_batch_exporter(exporter, runtime::Tokio) // Make sure runtime::Tokio is appropriate
         .with_config(sdktrace::config().with_resource(Resource::new(vec![
-            // Standard semantic conventions
-            KeyValue::new(
-                opentelemetry_semantic_conventions::resource::SERVICE_NAME,
-                "clickhouse-example-app",
-            ),
-            KeyValue::new(
-                opentelemetry_semantic_conventions::resource::SERVICE_VERSION,
-                "0.1.1",
-            ),
-            KeyValue::new("environment", "development"), // Custom attribute
+            KeyValue::new("service.name", "my-service-example"),
+            KeyValue::new("service.version", "1.0.1"),
+            KeyValue::new("deployment.environment", "development"),
         ])))
         .build();
 
-    info!("TracerProvider created.");
+    // Use the TracerProvider trait method
+    let tracer = provider.tracer("my-app-example", Some("v0.1.0"));
+    global::set_tracer_provider(provider);
+    Ok(tracer)
+}
 
-    // Set this provider as the global default (optional, but common)
-    let _ = global::set_tracer_provider(provider.clone()); // Clone provider if needed elsewhere
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load DSN from environment or use default
+    let clickhouse_dsn = env::var("CLICKHOUSE_DSN")
+        .unwrap_or_else(|_| "tcp://localhost:9000?compression=lz4".to_string());
 
-    // Get a tracer instance from the provider
-    let tracer = global::tracer("example-tracer"); // Use global tracer
+    // Configure the exporter
+    let exporter_config = ClickhouseExporterConfig::new(clickhouse_dsn)?
+        .with_schema_creation(true) // Ensure tables are created if they don't exist
+        .with_spans_table("otel_spans_example"); // Use specific table names for the example
 
-    // --- Create Spans ---
-    info!("Creating trace data...");
+    // Initialize the tracer
+    let tracer = init_tracer(exporter_config)?;
 
-    tracer.in_span("root-operation", |cx| {
+    // -- Example Trace Start --
+
+    // Root span: simulates an incoming request or main operation
+    tracer.in_span("root-operation", async |cx| { // Made closure async
         let span = cx.span();
-        span.set_attribute(KeyValue::new("app.feature", "example_feature"));
-        span.add_event("Starting root work", vec![]);
-        info!("Inside root span...");
+        span.set_attribute(KeyValue::new("app.user.id", "user-12345"));
+        span.add_event(
+            "Received request",
+            vec![KeyValue::new("http.method", "GET"), KeyValue::new("http.url", "/api/resource")]
+        );
 
-        // Simulate work
-        tokio::time::sleep(Duration::from_millis(15)).await;
+        // Simulate some work
+        tokio::time::sleep(Duration::from_millis(15)).await; // Use await inside async closure
 
-        // Create a child span for a simulated database call
-        tracer.in_span("child-db-query", |cx_child| {
+        // Child span: simulates a database query within the request
+        tracer.in_span("child-db-query", async |cx_child| { // Made closure async
             let child_span = cx_child.span();
-            child_span.set_kind(SpanKind::Client);
-            child_span.set_attribute(KeyValue::new(
-                opentelemetry_semantic_conventions::trace::DB_SYSTEM,
-                "clickhouse",
-            ));
-            child_span.set_attribute(KeyValue::new("db.operation", "SELECT"));
-            info!("Inside child DB span...");
 
-            tokio::time::sleep(Duration::from_millis(35)).await;
+            // Set SpanKind using attribute
+            child_span.set_attribute(KeyValue::new(
+                attribute::SPAN_KIND, // Use constant from attribute module
+                span_kind_to_string(&SpanKind::Client)
+            ));
+            // Set other DB related attributes using semantic conventions
+            child_span.set_attribute(KeyValue::new(attribute::DB_SYSTEM, "clickhouse")); // Use attribute::DB_SYSTEM
+            child_span.set_attribute(KeyValue::new(attribute::DB_NAME, "example_db"));
+            child_span.set_attribute(KeyValue::new(
+                attribute::DB_STATEMENT,
+                "SELECT * FROM users WHERE id = ?",
+            ));
+
+            // Simulate DB query time
+            tokio::time::sleep(Duration::from_millis(35)).await; // Use await inside async closure
 
             // Simulate an error scenario
-            let error_message = "Connection timeout to database";
-            child_span.set_status(Status::error(error_message));
-            child_span.record_error(&std::io::Error::new(
-                // Use record_error helper
-                std::io::ErrorKind::TimedOut,
-                error_message,
-            ));
-            child_span.add_event(
-                "Database Error Occurred", // Custom event name
-                vec![
-                    KeyValue::new("error.details", error_message),
-                    KeyValue::new("db.query.id", "q-9876"),
-                ],
-            );
-            info!("Child DB span finished with error.");
-        }); // Child span ends
+            let simulated_error = true;
+            if simulated_error {
+                let err_msg = "Simulated database connection error".to_string();
+                child_span.set_status(Status::Error { description: err_msg.clone().into() });
+                // Borrow the error for record_error
+                child_span.record_error(&std::io::Error::new(std::io::ErrorKind::ConnectionRefused, err_msg));
+                child_span.add_event("Database query failed", vec![]);
+            } else {
+                child_span.set_status(Status::Ok);
+                child_span.add_event("Database query successful", vec![KeyValue::new("db.rows_returned", 1)]);
+            }
+        }); // End child span
 
-        span.add_event("Root work finished", vec![]);
-        span.set_status(Status::Ok); // Set status for the root span
-        info!("Root span finished.");
-    }); // Root span ends
+        span.add_event("Finished processing request", vec![]);
 
-    info!("Trace data created. Spans should be queued for export.");
+    }); // End root span
 
-    // --- Shutdown ---
-    // Shut down the provider to ensure all buffered spans are flushed.
-    // This is crucial for batch processors.
-    info!("Shutting down TracerProvider to flush spans...");
-    global::shutdown_tracer_provider(); // Use global shutdown
-    info!("Shutdown complete. Check ClickHouse.");
+    // -- Example Trace End --
+
+    // Shut down the provider to ensure all spans are flushed
+    global::shutdown_tracer_provider();
+
+    println!("Trace finished. Check your ClickHouse `otel_spans_example` table.");
 
     Ok(())
 }

@@ -31,7 +31,8 @@ pub(crate) fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos() as u64
 }
 
-pub(crate) fn span_kind_to_string(kind: &SpanKind) -> String {
+// Made public for use in examples
+pub fn span_kind_to_string(kind: &SpanKind) -> String {
     match kind {
         SpanKind::Client => "Client",
         SpanKind::Server => "Server",

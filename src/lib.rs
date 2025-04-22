@@ -60,7 +60,7 @@
 mod config;
 mod error;
 mod exporter;
-mod model;
+pub mod model;
 mod schema;
 
 pub use config::ClickhouseExporterConfig;
