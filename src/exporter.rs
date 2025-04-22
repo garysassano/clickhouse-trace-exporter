@@ -9,11 +9,12 @@ use crate::schema;
 use async_trait::async_trait;
 use clickhouse::Client;
 use opentelemetry::{
-    trace::Status,
+    // Removed unused trace::Status
     Key, // Import Key for resource lookup
 };
 use opentelemetry_sdk::{
-    trace::{SpanData, SpanExporter, TraceError}, // Import TraceError from sdk::trace
+    // Use full path for TraceError, remove alias
+    trace::{SpanData, SpanExporter, TraceError}, // Import SDK Error as OTelSdkError
     Resource, // Keep Resource import for service name extraction attempt
 };
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME; // Import SERVICE_NAME
@@ -104,7 +105,7 @@ impl ClickhouseExporter {
     fn get_service_name_from_resource(&self) -> String {
         self.resource
             .as_ref()
-            .and_then(|res| res.get(Key::from(SERVICE_NAME))) // Use Key::from()
+            .and_then(|res| res.get(&Key::from(SERVICE_NAME))) // Borrow the Key
             .map(|v| crate::model::value_to_string(&v))
             .unwrap_or_else(|| "unknown_service".to_string())
     }
@@ -113,7 +114,7 @@ impl ClickhouseExporter {
 #[async_trait]
 impl SpanExporter for ClickhouseExporter {
     // Updated signature to take &self instead of &mut self
-    fn export(&self, batch: Vec<SpanData>) -> BoxFuture<'static, Status> {
+    fn export(&self, batch: Vec<SpanData>) -> BoxFuture<'static, Result<(), TraceError>> {
         // Clone client for the async block.
         // WARNING: Cloning client might not be ideal for performance/safety.
         // Consider Arc<Client> or connection pooling.
@@ -123,7 +124,7 @@ impl SpanExporter for ClickhouseExporter {
 
         Box::pin(async move {
             if batch.is_empty() {
-                return Status::Ok;
+                return Ok(());
             }
             let batch_size = batch.len();
             let start_time = std::time::Instant::now();
@@ -187,6 +188,7 @@ impl SpanExporter for ClickhouseExporter {
                 Ok::<(), ClickhouseExporterError>(())
             }.await;
 
+            // Map internal Result to OTel Sdk Result
             match insert_result {
                 Ok(_) => {
                     let elapsed = start_time.elapsed();
@@ -195,15 +197,17 @@ impl SpanExporter for ClickhouseExporter {
                         batch_size,
                         elapsed
                     );
-                    Status::Ok
+                    Ok(())
                 }
                 Err(e) => {
-                    Status::Error { description: e.to_string().into() }
+                    // Convert internal error to OTel Sdk Error using explicit path
+                    Err(TraceError::Other(e.to_string().into()))
                 }
             }
         })
     }
 
+    // Updated signature to use explicit TraceError path
     fn shutdown(&mut self) -> Result<(), TraceError> {
         tracing::info!("Shutting down ClickHouse exporter.");
         // Potentially add client shutdown logic if available/needed
