@@ -1,0 +1,27 @@
+[package]
+name = "opentelemetry-clickhouse-exporter"
+version = "0.1.0"
+edition = "2024"
+description = "An OpenTelemetry trace exporter for ClickHouse using the Rust SDK"
+license = "Apache-2.0" # Or your preferred license
+repository = "" # Optional: Add your repo URL
+
+[dependencies]
+opentelemetry = { version = "0.23", features = ["trace"] }
+opentelemetry_sdk = { version = "0.23", features = ["trace", "rt-tokio"] }
+# Correct crate name: clickhouse
+clickhouse = { version = "0.2" } # Check crates.io for latest version/features
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1.0"
+tracing = "0.1" # For internal logging within the exporter
+url = "2.5"
+uuid = { version = "1", features = ["v4"] } # If using UUID type in ClickHouse schema
+chrono = "0.4"
+
+[dev-dependencies]
+# Use opentelemetry_api if needed for examples, but opentelemetry itself works too
+# opentelemetry_api = { version = "0.22", features = ["trace"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+dotenvy = "0.15" # To load .env for example DSN
