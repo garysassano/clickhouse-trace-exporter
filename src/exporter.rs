@@ -13,8 +13,9 @@ use opentelemetry::{
     Key, // Import Key for resource lookup
 };
 use opentelemetry_sdk::{
-    // Use full path for TraceError, remove alias
-    trace::{SpanData, SpanExporter, TraceError}, // Import SDK Error as OTelSdkError
+    // Import Error from the sdk::error module
+    trace::{SpanData, SpanExporter},
+    error::Error as OTelSdkError, // Import the SDK's Error type from error module
     Resource, // Keep Resource import for service name extraction attempt
 };
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME; // Import SERVICE_NAME
@@ -113,8 +114,8 @@ impl ClickhouseExporter {
 
 #[async_trait]
 impl SpanExporter for ClickhouseExporter {
-    // Updated signature to take &self instead of &mut self
-    fn export(&self, batch: Vec<SpanData>) -> BoxFuture<'static, Result<(), TraceError>> {
+    // Use the alias OTelSdkError for the return type
+    fn export(&self, batch: Vec<SpanData>) -> BoxFuture<'static, Result<(), OTelSdkError>> {
         // Clone client for the async block.
         // WARNING: Cloning client might not be ideal for performance/safety.
         // Consider Arc<Client> or connection pooling.
@@ -188,7 +189,7 @@ impl SpanExporter for ClickhouseExporter {
                 Ok::<(), ClickhouseExporterError>(())
             }.await;
 
-            // Map internal Result to OTel Sdk Result
+            // Map internal Result to OTel Sdk Result using the alias
             match insert_result {
                 Ok(_) => {
                     let elapsed = start_time.elapsed();
@@ -200,15 +201,15 @@ impl SpanExporter for ClickhouseExporter {
                     Ok(())
                 }
                 Err(e) => {
-                    // Convert internal error to OTel Sdk Error using explicit path
-                    Err(TraceError::Other(e.to_string().into()))
+                    // Convert internal error to OTel Sdk Error using the alias
+                    Err(OTelSdkError::Other(e.to_string().into()))
                 }
             }
         })
     }
 
-    // Updated signature to use explicit TraceError path
-    fn shutdown(&mut self) -> Result<(), TraceError> {
+    // Use the alias OTelSdkError for the return type
+    fn shutdown(&mut self) -> Result<(), OTelSdkError> {
         tracing::info!("Shutting down ClickHouse exporter.");
         // Potentially add client shutdown logic if available/needed
         Ok(())
