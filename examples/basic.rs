@@ -1,36 +1,44 @@
 //! Basic exporter example
 use opentelemetry::{
-    global,
-    trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider}, // Removed Span, Added TracerProvider
-    KeyValue,
+    Context, KeyValue, global,
+    trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider},
 };
-use opentelemetry_sdk::{runtime, trace as sdktrace, Resource};
+use opentelemetry_clickhouse_exporter::{
+    ClickhouseExporter, ClickhouseExporterConfig, model::span_kind_to_string,
+};
+use opentelemetry_sdk::{resource::Resource, trace as sdktrace};
 use std::env;
 use std::time::Duration;
-use opentelemetry_clickhouse_exporter::{ClickhouseExporter, ClickhouseExporterConfig, model::span_kind_to_string};
 
-// Import attribute::* for semantic conventions
-use opentelemetry_semantic_conventions::attribute;
-
-fn init_tracer(config: ClickhouseExporterConfig) -> Result<sdktrace::Tracer, Box<dyn std::error::Error>> {
-    opentelemetry::global::set_text_map_propagator(opentelemetry_sdk::propagation::TraceContextPropagator::new());
+fn init_tracer(
+    config: ClickhouseExporterConfig,
+) -> Result<sdktrace::Tracer, Box<dyn std::error::Error>> {
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
 
     // Create the exporter asynchronously
     let exporter = futures::executor::block_on(ClickhouseExporter::new(config))?;
 
-    // Build a tracer provider with a batch processor using the async exporter
-    let provider = sdktrace::TracerProvider::builder()
-        .with_batch_exporter(exporter, runtime::Tokio) // Make sure runtime::Tokio is appropriate
-        .with_config(sdktrace::config().with_resource(Resource::new(vec![
-            KeyValue::new("service.name", "my-service-example"),
-            KeyValue::new("service.version", "1.0.1"),
-            KeyValue::new("deployment.environment", "development"),
-        ])))
+    // Create resource with service information via ResourceBuilder
+    let resource = Resource::builder()
+        .with_service_name("my-service-example")
+        .with_attribute(KeyValue::new("service.version", "1.0.1"))
+        .with_attribute(KeyValue::new("deployment.environment", "development"))
         .build();
 
-    // Use the TracerProvider trait method
-    let tracer = provider.tracer("my-app-example", Some("v0.1.0"));
+    // Build a tracer provider with batch span processor
+    let provider = sdktrace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter)
+        .with_resource(resource)
+        .build();
+
+    // Create a tracer
+    let tracer = provider.tracer("my-app-example");
+
+    // Set as global provider
     global::set_tracer_provider(provider);
+
     Ok(tracer)
 }
 
@@ -51,59 +59,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -- Example Trace Start --
 
     // Root span: simulates an incoming request or main operation
-    tracer.in_span("root-operation", async |cx| { // Made closure async
+    tracer.in_span("root-operation", |cx| {
         let span = cx.span();
         span.set_attribute(KeyValue::new("app.user.id", "user-12345"));
         span.add_event(
             "Received request",
-            vec![KeyValue::new("http.method", "GET"), KeyValue::new("http.url", "/api/resource")]
+            vec![
+                KeyValue::new("http.method", "GET"),
+                KeyValue::new("http.url", "/api/resource"),
+            ],
         );
 
         // Simulate some work
-        tokio::time::sleep(Duration::from_millis(15)).await; // Use await inside async closure
+        std::thread::sleep(Duration::from_millis(15));
 
         // Child span: simulates a database query within the request
-        tracer.in_span("child-db-query", async |cx_child| { // Made closure async
+        tracer.in_span("child-db-query", |cx_child| {
             let child_span = cx_child.span();
 
             // Set SpanKind using attribute
             child_span.set_attribute(KeyValue::new(
-                attribute::SPAN_KIND, // Use constant from attribute module
-                span_kind_to_string(&SpanKind::Client)
+                "span.kind",
+                span_kind_to_string(&SpanKind::Client),
             ));
-            // Set other DB related attributes using semantic conventions
-            child_span.set_attribute(KeyValue::new(attribute::DB_SYSTEM, "clickhouse")); // Use attribute::DB_SYSTEM
-            child_span.set_attribute(KeyValue::new(attribute::DB_NAME, "example_db"));
+
+            // Set other DB related attributes
+            child_span.set_attribute(KeyValue::new("db.system", "clickhouse"));
+            child_span.set_attribute(KeyValue::new("db.name", "example_db"));
             child_span.set_attribute(KeyValue::new(
-                attribute::DB_STATEMENT,
+                "db.statement",
                 "SELECT * FROM users WHERE id = ?",
             ));
 
             // Simulate DB query time
-            tokio::time::sleep(Duration::from_millis(35)).await; // Use await inside async closure
+            std::thread::sleep(Duration::from_millis(35));
 
             // Simulate an error scenario
             let simulated_error = true;
             if simulated_error {
                 let err_msg = "Simulated database connection error".to_string();
-                child_span.set_status(Status::Error { description: err_msg.clone().into() });
+                child_span.set_status(Status::Error {
+                    description: err_msg.clone().into(),
+                });
                 // Borrow the error for record_error
-                child_span.record_error(&std::io::Error::new(std::io::ErrorKind::ConnectionRefused, err_msg));
+                child_span.record_error(&std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    err_msg,
+                ));
                 child_span.add_event("Database query failed", vec![]);
             } else {
                 child_span.set_status(Status::Ok);
-                child_span.add_event("Database query successful", vec![KeyValue::new("db.rows_returned", 1)]);
+                child_span.add_event(
+                    "Database query successful",
+                    vec![KeyValue::new("db.rows_returned", 1)],
+                );
             }
-        }); // End child span
+        });
 
         span.add_event("Finished processing request", vec![]);
-
-    }); // End root span
+    });
 
     // -- Example Trace End --
 
-    // Shut down the provider to ensure all spans are flushed
-    global::shutdown_tracer_provider();
+    // Manually dropping all references to the provider/tracer will initiate shutdown
+    // through Drop trait implementation on the last reference
 
     println!("Trace finished. Check your ClickHouse `otel_spans_example` table.");
 

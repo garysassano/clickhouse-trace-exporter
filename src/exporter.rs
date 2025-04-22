@@ -13,13 +13,12 @@ use opentelemetry::{
     Key, // Import Key for resource lookup
 };
 use opentelemetry_sdk::{
-    // Import Error from the sdk::error module
+    // Import the correct SDK error types
     trace::{SpanData, SpanExporter},
-    error::Error as OTelSdkError, // Import the SDK's Error type from error module
+    error::{OTelSdkError, OTelSdkResult}, // Fix: using correct imports
     Resource, // Keep Resource import for service name extraction attempt
 };
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME; // Import SERVICE_NAME
-use futures::future::BoxFuture; // Removed unused ok, err
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use std::fmt; // Import fmt for manual Debug impl
@@ -114,8 +113,11 @@ impl ClickhouseExporter {
 
 #[async_trait]
 impl SpanExporter for ClickhouseExporter {
-    // Use the alias OTelSdkError for the return type
-    fn export(&self, batch: Vec<SpanData>) -> BoxFuture<'static, Result<(), OTelSdkError>> {
+    // Use the correct signature that matches the trait
+    fn export(
+        &self, 
+        batch: Vec<SpanData>
+    ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
         // Clone client for the async block.
         // WARNING: Cloning client might not be ideal for performance/safety.
         // Consider Arc<Client> or connection pooling.
@@ -189,7 +191,7 @@ impl SpanExporter for ClickhouseExporter {
                 Ok::<(), ClickhouseExporterError>(())
             }.await;
 
-            // Map internal Result to OTel Sdk Result using the alias
+            // Map internal Result to OTelSdkResult
             match insert_result {
                 Ok(_) => {
                     let elapsed = start_time.elapsed();
@@ -201,15 +203,15 @@ impl SpanExporter for ClickhouseExporter {
                     Ok(())
                 }
                 Err(e) => {
-                    // Convert internal error to OTel Sdk Error using the alias
-                    Err(OTelSdkError::Other(e.to_string().into()))
+                    // Convert internal error to OTelSdkError::Other
+                    Err(OTelSdkError::InternalFailure(e.to_string()))
                 }
             }
         })
     }
 
-    // Use the alias OTelSdkError for the return type
-    fn shutdown(&mut self) -> Result<(), OTelSdkError> {
+    // Use the correct OTelSdkResult type
+    fn shutdown(&mut self) -> OTelSdkResult {
         tracing::info!("Shutting down ClickHouse exporter.");
         // Potentially add client shutdown logic if available/needed
         Ok(())
