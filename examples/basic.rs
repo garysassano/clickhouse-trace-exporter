@@ -25,9 +25,9 @@ fn init_tracer(
         .with_attribute(KeyValue::new("deployment.environment", "development"))
         .build();
 
-    // Build a tracer provider with simple span processor for immediate export
+    // Build a tracer provider with batch span processor (uses tokio runtime)
     let provider = sdktrace::SdkTracerProvider::builder()
-        .with_simple_exporter(exporter)
+        .with_batch_exporter(exporter)
         .with_resource(resource)
         .build();
 
@@ -119,9 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // -- Example Trace End --
 
-    // No explicit shutdown needed for simple exporter; spans have been exported synchronously
-
     println!("Trace finished. Check your ClickHouse `otel_spans_example` table.");
-
+    // Shutdown the tracer provider to flush any remaining spans
+    global::shutdown_tracer_provider();
     Ok(())
 }
