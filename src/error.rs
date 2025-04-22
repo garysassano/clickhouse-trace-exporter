@@ -25,17 +25,3 @@ pub enum ClickhouseExporterError {
     #[error("Missing required configuration: {0}")]
     MissingConfiguration(String),
 }
-
-// Convert internal errors to OTel ExportError
-impl From<ClickhouseExporterError> for ExportError {
-    fn from(e: ClickhouseExporterError) -> Self {
-        ExportError::other(e.to_string())
-    }
-}
-
-// Convert internal errors to OTel TraceError
-impl From<ClickhouseExporterError> for TraceError {
-    fn from(e: ClickhouseExporterError) -> Self {
-        TraceError::ExportError(ExportError::other(e.to_string()))
-    }
-}

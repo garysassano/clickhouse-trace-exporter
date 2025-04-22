@@ -46,15 +46,14 @@ impl ClickhouseExporter {
         Ok(ClickhouseExporter { pool, config })
     }
 
-    // Helper to get resource from SpanData batch (assuming it's consistent)
-    fn get_resource_from_batch<'a>(&self, batch: &'a [SpanData]) -> Cow<'a, Resource> {
+    // Helper to get resource from SpanData batch
+    // Adjusted to work with Vec<SpanData>
+    fn get_resource_from_batch<'a>(&self, batch: &'a Vec<SpanData>) -> Cow<'a, Resource> {
         batch
             .first()
-            .map(|sd| sd.resource.clone()) // sd.resource is likely Cow<Resource>
+            .map(|sd| sd.resource.clone())
             .unwrap_or_else(|| {
-                // Fallback if batch is empty: return a default owned resource.
-                // Consider logging a warning here.
-                Cow::Owned(Resource::default()) // Or Resource::empty()
+                Cow::Owned(Resource::default())
             })
     }
 }
@@ -62,9 +61,8 @@ impl ClickhouseExporter {
 #[async_trait]
 impl SpanExporter for ClickhouseExporter {
     /// Exports a batch of spans.
-    /// Updated signature to return BoxFuture and match trait bounds
-    fn export<'a>(&'a mut self, batch: Cow<'a, [SpanData]>) -> BoxFuture<'a, ExportResult> {
-        // Wrap the async logic in Box::pin
+    /// Reverted signature to use Vec<SpanData>
+    fn export<'a>(&'a mut self, batch: Vec<SpanData>) -> BoxFuture<'a, ExportResult> {
         Box::pin(async move {
             if batch.is_empty() {
                 return Ok(());
@@ -73,13 +71,14 @@ impl SpanExporter for ClickhouseExporter {
             let batch_size = batch.len();
             tracing::debug!("Exporting batch of {} spans to ClickHouse", batch_size);
 
-            let resource = self.get_resource_from_batch(&batch);
+            let resource = self.get_resource_from_batch(&batch); // Pass Vec ref
 
             let mut span_rows: Vec<SpanRow> = Vec::with_capacity(batch_size);
             let mut error_rows: Vec<ErrorRow> = Vec::with_capacity(batch_size);
 
-            for span_data in batch.iter() {
-                let (span_row, mut errors) = convert_otel_span_to_rows(span_data, &resource);
+            // Iterate over owned Vec<SpanData>
+            for span_data in batch {
+                let (span_row, mut errors) = convert_otel_span_to_rows(&span_data, &resource);
                 span_rows.push(span_row);
                 error_rows.append(&mut errors);
             }
@@ -88,7 +87,8 @@ impl SpanExporter for ClickhouseExporter {
                 Ok(client) => client,
                 Err(e) => {
                     tracing::error!("Failed to get ClickHouse client handle from pool: {}", e);
-                    return Err(ClickhouseExporterError::ClickhousePoolError(e).into());
+                    // Box the error for ExportResult
+                    return Err(Box::new(ClickhouseExporterError::ClickhousePoolError(e)));
                 }
             };
 
@@ -101,7 +101,8 @@ impl SpanExporter for ClickhouseExporter {
                         table_name,
                         e
                     );
-                    return Err(ClickhouseExporterError::ClickhouseClientError(e).into());
+                    // Box the error for ExportResult
+                    return Err(Box::new(ClickhouseExporterError::ClickhouseClientError(e)));
                 }
             }
 
@@ -114,7 +115,8 @@ impl SpanExporter for ClickhouseExporter {
                         table_name,
                         e
                     );
-                    // Decide if this should be a hard failure for the whole batch export
+                    // Optionally return error here too:
+                    // return Err(Box::new(ClickhouseExporterError::ClickhouseClientError(e)));
                 }
             }
 

@@ -162,7 +162,7 @@ pub(crate) struct ErrorRow {
 // Helper to extract service name from resource attributes
 fn get_service_name(resource: &Resource) -> String {
     resource
-        .get(resource::SERVICE_NAME.into())
+        .get(resource::ResourceAttributes::SERVICE_NAME.into())
         .map_or_else(|| "unknown_service".to_string(), |v| value_to_string(&v))
 }
 
@@ -243,7 +243,9 @@ pub(crate) fn convert_otel_span_to_rows(
         .events
         .iter()
         // Use updated semantic conventions path/constant
-        .filter(|ev| ev.name.as_ref() == trace::EXCEPTION_EVENT_NAME.to_string())
+        .filter(|ev| {
+            ev.name.as_ref() == trace::SemanticAttributes::EXCEPTION_EVENT_NAME.to_string()
+        })
         .map(|ev| {
             let mut error_kind = "".to_string();
             let mut error_message = "".to_string();
@@ -254,11 +256,11 @@ pub(crate) fn convert_otel_span_to_rows(
                 let key_str = kv.key.as_str();
                 let value_str = value_to_string(&kv.value);
 
-                if key_str == trace::EXCEPTION_TYPE.to_string() {
+                if key_str == trace::SemanticAttributes::EXCEPTION_TYPE.to_string() {
                     error_kind = value_str.clone();
-                } else if key_str == trace::EXCEPTION_MESSAGE.to_string() {
+                } else if key_str == trace::SemanticAttributes::EXCEPTION_MESSAGE.to_string() {
                     error_message = value_str.clone();
-                } else if key_str == trace::EXCEPTION_STACKTRACE.to_string() {
+                } else if key_str == trace::SemanticAttributes::EXCEPTION_STACKTRACE.to_string() {
                     error_stacktrace = value_str.clone();
                 }
                 error_attributes.insert(key_str.to_string(), value_str);
