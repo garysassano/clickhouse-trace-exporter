@@ -1,49 +1,73 @@
 use crate::config::ClickhouseExporterConfig;
 use crate::error::ClickhouseExporterError;
-use crate::model::{ // Import necessary utils and helpers
-    system_time_to_utc, attributes_to_map, duration_to_nanos, 
-    span_kind_to_string, status_code_to_string, // Removed get_service_name
-    convert_events, convert_links
+use crate::model::{
+    attributes_to_map,
+    convert_events,
+    convert_links,
+    duration_to_nanos,
+    span_kind_to_string,
+    status_code_to_string, // Removed get_service_name
+    // Import necessary utils and helpers
+    system_time_to_utc,
 };
 use crate::schema;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use clickhouse::Client;
+use clickhouse::Compression;
 use opentelemetry::{
     // Removed unused trace::Status
     Key, // Import Key for resource lookup
 };
 use opentelemetry_sdk::{
+    Resource, // Keep Resource import for service name extraction attempt
+    error::{OTelSdkError, OTelSdkResult}, // Fix: using correct imports
     // Import the correct SDK error types
     trace::{SpanData, SpanExporter},
-    error::{OTelSdkError, OTelSdkResult}, // Fix: using correct imports
-    Resource, // Keep Resource import for service name extraction attempt
 };
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME; // Import SERVICE_NAME
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 use std::fmt; // Import fmt for manual Debug impl
 
 // Define a struct that derives `Row` for insertion
 // Ensure field names match the SQL insert columns exactly
 #[derive(clickhouse::Row, Clone, serde::Serialize)] // Removed Debug derive, Added Clone
-struct SpanRow { // Removed lifetime 'a
-    #[serde(rename = "Timestamp")] timestamp: DateTime<Utc>,
-    #[serde(rename = "TraceId")] trace_id: String, // Changed to owned String
-    #[serde(rename = "SpanId")] span_id: String,   // Changed to owned String
-    #[serde(rename = "ParentSpanId")] parent_span_id: String,
-    #[serde(rename = "TraceState")] trace_state: String,
-    #[serde(rename = "SpanName")] span_name: String,
-    #[serde(rename = "SpanKind")] span_kind: String,
-    #[serde(rename = "ServiceName")] service_name: String,
-    #[serde(rename = "ResourceAttributes")] resource_attributes: HashMap<String, String>,
-    #[serde(rename = "ScopeName")] scope_name: String,
-    #[serde(rename = "ScopeVersion")] scope_version: String,
-    #[serde(rename = "SpanAttributes")] span_attributes: HashMap<String, String>,
-    #[serde(rename = "Duration")] duration: u64,
-    #[serde(rename = "StatusCode")] status_code: String,
-    #[serde(rename = "StatusMessage")] status_message: String,
-    #[serde(rename = "Events")] events: Vec<crate::schema::EventRow>,
-    #[serde(rename = "Links")] links: Vec<crate::schema::LinkRow>,
+struct SpanRow {
+    // Removed lifetime 'a
+    #[serde(rename = "Timestamp")]
+    timestamp: DateTime<Utc>,
+    #[serde(rename = "TraceId")]
+    trace_id: String, // Changed to owned String
+    #[serde(rename = "SpanId")]
+    span_id: String, // Changed to owned String
+    #[serde(rename = "ParentSpanId")]
+    parent_span_id: String,
+    #[serde(rename = "TraceState")]
+    trace_state: String,
+    #[serde(rename = "SpanName")]
+    span_name: String,
+    #[serde(rename = "SpanKind")]
+    span_kind: String,
+    #[serde(rename = "ServiceName")]
+    service_name: String,
+    #[serde(rename = "ResourceAttributes")]
+    resource_attributes: HashMap<String, String>,
+    #[serde(rename = "ScopeName")]
+    scope_name: String,
+    #[serde(rename = "ScopeVersion")]
+    scope_version: String,
+    #[serde(rename = "SpanAttributes")]
+    span_attributes: HashMap<String, String>,
+    #[serde(rename = "Duration")]
+    duration: u64,
+    #[serde(rename = "StatusCode")]
+    status_code: String,
+    #[serde(rename = "StatusMessage")]
+    status_message: String,
+    #[serde(rename = "Events")]
+    events: Vec<crate::schema::EventRow>,
+    #[serde(rename = "Links")]
+    links: Vec<crate::schema::LinkRow>,
 }
 
 // Add manual Debug impl because clickhouse::Client doesn't implement it
@@ -56,17 +80,17 @@ pub struct ClickhouseExporter {
     config: ClickhouseExporterConfig,
     // Store resource info (like service name) if available during construction
     // This is a workaround as SpanData doesn't provide it directly in v0.29
-    resource: Option<Resource>, 
+    resource: Option<Resource>,
 }
 
 // Manual Debug impl
 impl fmt::Debug for ClickhouseExporter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClickhouseExporter")
-         .field("client", &"<Clickhouse Client>") // Placeholder for non-Debug client
-         .field("config", &self.config)
-         .field("resource", &self.resource) // Debug resource if present
-         .finish()
+            .field("client", &"<Clickhouse Client>") // Placeholder for non-Debug client
+            .field("config", &self.config)
+            .field("resource", &self.resource) // Debug resource if present
+            .finish()
     }
 }
 
@@ -74,7 +98,7 @@ impl ClickhouseExporter {
     // Allow passing optional resource during construction
     pub async fn new_with_resource(
         config: ClickhouseExporterConfig,
-        resource: Option<Resource> // Accept optional Resource
+        resource: Option<Resource>, // Accept optional Resource
     ) -> Result<Self, ClickhouseExporterError> {
         tracing::info!(
             "Initializing ClickHouse exporter (Host: {}, Schema Create: {})",
@@ -82,18 +106,54 @@ impl ClickhouseExporter {
             config.create_schema
         );
 
-        // Create client using default and configuring with URL (suitable for clickhouse v0.13.x)
-        let client = Client::default().with_url(config.dsn.as_str());
+        // Build base HTTP URL without query (host, port, path)
+        let mut base_url = config.dsn.clone();
+        base_url.set_query(None);
+        let mut client = Client::default().with_url(base_url.as_str());
+        // Extract credentials from userinfo
+        if !config.dsn.username().is_empty() {
+            client = client.with_option("user", config.dsn.username());
+        }
+        if let Some(pass) = config.dsn.password() {
+            client = client.with_option("password", pass);
+        }
+        // Parse query pairs for compression and secure and other options
+        for (key, value) in config.dsn.query_pairs() {
+            match key.as_ref() {
+                "compression" => {
+                    if value == "lz4" {
+                        client = client.with_compression(Compression::Lz4);
+                    }
+                }
+                "secure" => {
+                    if value == "true" {
+                        client = client.with_option("secure", "true");
+                    }
+                }
+                _ => {
+                    // Pass through any other options
+                    client = client.with_option(key.as_ref(), value.as_ref());
+                }
+            }
+        }
 
         // Verify connection by executing a simple query
-        client.query("SELECT 1").execute().await.map_err(ClickhouseExporterError::ClickhouseClientError)?;
+        client
+            .query("SELECT 1")
+            .execute()
+            .await
+            .map_err(ClickhouseExporterError::ClickhouseClientError)?;
         tracing::debug!("Successfully connected to ClickHouse.");
 
         if config.create_schema {
             schema::ensure_schema(&client, &config).await?;
         }
 
-        Ok(ClickhouseExporter { client, config, resource })
+        Ok(ClickhouseExporter {
+            client,
+            config,
+            resource,
+        })
     }
 
     // Convenience function without resource (uses default)
@@ -115,8 +175,8 @@ impl ClickhouseExporter {
 impl SpanExporter for ClickhouseExporter {
     // Use the correct signature that matches the trait
     fn export(
-        &self, 
-        batch: Vec<SpanData>
+        &self,
+        batch: Vec<SpanData>,
     ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
         // Clone client for the async block.
         // WARNING: Cloning client might not be ideal for performance/safety.
@@ -133,9 +193,9 @@ impl SpanExporter for ClickhouseExporter {
             let start_time = std::time::Instant::now();
 
             let insert_result = async {
-                let mut insert = client.insert(&table_name).map_err(|e| {
-                    ClickhouseExporterError::ClickhouseClientError(e)
-                })?;
+                let mut insert = client
+                    .insert(&table_name)
+                    .map_err(|e| ClickhouseExporterError::ClickhouseClientError(e))?;
 
                 for span_data in &batch {
                     let scope = &span_data.instrumentation_scope;
@@ -147,7 +207,9 @@ impl SpanExporter for ClickhouseExporter {
                     let links = convert_links(&span_data.links);
 
                     let status_message = match &span_data.status {
-                        opentelemetry::trace::Status::Error { description } => description.to_string(),
+                        opentelemetry::trace::Status::Error { description } => {
+                            description.to_string()
+                        }
                         _ => "".to_string(),
                     };
 
@@ -178,7 +240,11 @@ impl SpanExporter for ClickhouseExporter {
                     };
 
                     insert.write(&row).await.map_err(|e| {
-                         tracing::error!("Failed preparing span {} for ClickHouse batch insert: {}", row.span_id, e);
+                        tracing::error!(
+                            "Failed preparing span {} for ClickHouse batch insert: {}",
+                            row.span_id,
+                            e
+                        );
                         ClickhouseExporterError::ClickhouseClientError(e)
                     })?;
                 }
@@ -189,7 +255,8 @@ impl SpanExporter for ClickhouseExporter {
                 })?;
 
                 Ok::<(), ClickhouseExporterError>(())
-            }.await;
+            }
+            .await;
 
             // Map internal Result to OTelSdkResult
             match insert_result {
