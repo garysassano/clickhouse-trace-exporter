@@ -25,7 +25,7 @@ fn init_tracer(
         .with_attribute(KeyValue::new("deployment.environment", "development"))
         .build();
 
-    // Build a tracer provider with batch span processor
+    // Build a tracer provider with simple span processor for immediate export
     let provider = sdktrace::SdkTracerProvider::builder()
         .with_simple_exporter(exporter)
         .with_resource(resource)
@@ -119,8 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // -- Example Trace End --
 
-    // Manually dropping all references to the provider/tracer will initiate shutdown
-    // through Drop trait implementation on the last reference
+    // No explicit shutdown needed for simple exporter; spans have been exported synchronously
 
     println!("Trace finished. Check your ClickHouse `otel_spans_example` table.");
 
