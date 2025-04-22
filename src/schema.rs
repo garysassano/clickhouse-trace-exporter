@@ -1,6 +1,7 @@
 use crate::config::ClickhouseExporterConfig;
 use crate::error::ClickhouseExporterError;
-use clickhouse::Client; // Use correct crate name
+use clickhouse::error::Error as ClickhouseError;
+use clickhouse::Pool; // Use correct crate name
 
 // --- SQL Schema Definitions ---
 // NOTE: Carefully review and adjust types (DateTime64 precision, String vs FixedString/UUID, Map types)
@@ -77,7 +78,7 @@ fn get_errors_schema(table_name: &str) -> String {
 
 /// Executes `CREATE TABLE IF NOT EXISTS` statements if config.create_schema is true.
 pub(crate) async fn ensure_schema(
-    client: &Client,
+    pool: &Pool, // Use correct crate name (already Pool)
     config: &ClickhouseExporterConfig,
 ) -> Result<(), ClickhouseExporterError> {
     if !config.create_schema {
@@ -85,6 +86,9 @@ pub(crate) async fn ensure_schema(
         return Ok(());
     }
     tracing::info!("Ensuring ClickHouse schema exists...");
+
+    // Get a client handle from the pool to execute DDL
+    let mut client = pool.get_handle().await.map_err(ClickhouseExporterError::ClickhousePoolError)?;
 
     let spans_sql = get_spans_schema(&config.spans_table_name);
     let errors_sql = get_errors_schema(&config.errors_table_name);
@@ -95,7 +99,7 @@ pub(crate) async fn ensure_schema(
         .query(&spans_sql)
         .execute()
         .await
-        .map_err(|e| {
+        .map_err(|e: ClickhouseError| {
             tracing::error!("Failed to create/check spans table '{}': {}", config.spans_table_name, e);
             ClickhouseExporterError::SchemaCreationError(e)
         })?;
@@ -105,7 +109,7 @@ pub(crate) async fn ensure_schema(
         .query(&errors_sql)
         .execute()
         .await
-         .map_err(|e| {
+         .map_err(|e: ClickhouseError| {
             tracing::error!("Failed to create/check errors table '{}': {}", config.errors_table_name, e);
             ClickhouseExporterError::SchemaCreationError(e)
         })?;

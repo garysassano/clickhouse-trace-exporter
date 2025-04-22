@@ -1,59 +1,81 @@
-use chrono::{DateTime, TimeZone, Utc};
-use opentelemetry::trace::{SpanKind, StatusCode};
-use opentelemetry::{Key, Value};
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::export::trace::SpanData;
+use chrono::{DateTime, LocalResult, TimeZone, Utc};
+use clickhouse::Row;
+use opentelemetry::{
+    trace::{Link, SpanKind, Status},
+    Key, KeyValue, Value,
+};
+use opentelemetry_sdk::{export::trace::SpanData, Resource};
+use opentelemetry_semantic_conventions::{resource, trace};
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 // --- Utility Functions ---
 
-/// Converts OTel SystemTime to chrono DateTime<Utc> needed by clickhouse crate.
-/// Preserves nanosecond precision if the DateTime64(9) type is used in CH.
-fn system_time_to_chrono_utc(st: SystemTime) -> DateTime<Utc> {
-    let epoch_duration = st.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
-    Utc.timestamp_opt(
+fn system_time_to_utc(st: SystemTime) -> DateTime<Utc> {
+    let epoch_duration = st.duration_since(UNIX_EPOCH).unwrap_or_default();
+    // Use .single() to resolve LocalResult from timestamp_opt
+    match Utc.timestamp_opt(
         epoch_duration.as_secs() as i64,
         epoch_duration.subsec_nanos(),
-    )
-    .unwrap_or_default() // Should not fail for valid SystemTime
+    ) {
+        LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => dt,
+        LocalResult::None => Utc::now(), // Fallback or handle error
+    }
 }
 
-/// Maps OTel SpanKind enum to a string representation.
-fn span_kind_to_string(kind: SpanKind) -> &'static str {
+fn duration_to_nanos(duration: Duration) -> i64 {
+    duration.as_nanos() as i64 // Consider potential overflow if duration is extremely large
+}
+
+fn span_kind_to_string(kind: &SpanKind) -> String {
     match kind {
-        SpanKind::Client => "CLIENT",
-        SpanKind::Server => "SERVER",
-        SpanKind::Producer => "PRODUCER",
-        SpanKind::Consumer => "CONSUMER",
-        SpanKind::Internal => "INTERNAL",
+        SpanKind::Client => "Client",
+        SpanKind::Server => "Server",
+        SpanKind::Producer => "Producer",
+        SpanKind::Consumer => "Consumer",
+        SpanKind::Internal => "Internal",
+    }
+    .to_string()
+}
+
+fn status_code_to_string(status: &Status) -> String {
+    match status {
+        Status::Ok => "Ok",
+        Status::Error { .. } => "Error",
+        Status::Unset => "Unset",
+    }
+    .to_string()
+}
+
+// Convert OTel Value to String. Adjust based on how you want to handle complex types (arrays, etc.)
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::F64(f) => f.to_string(),
+        Value::I64(i) => i.to_string(),
+        Value::Array(arr) => format!("{:?}", arr), // Basic array representation
+                                                   // Add other types as needed (Bytes, etc.)
     }
 }
 
-/// Maps OTel StatusCode enum to a string representation.
-fn status_code_to_string(code: StatusCode) -> &'static str {
-    match code {
-        StatusCode::Ok => "OK",
-        StatusCode::Error => "ERROR",
-        StatusCode::Unset => "UNSET",
-    }
-}
-
-/// Converts OTel KeyValue attributes/links/events attributes to a HashMap<String, String>.
-/// Note: This simplifies all values to strings. Handle numeric/boolean types differently if needed.
-fn attributes_to_map(attrs: &[(Key, Value)]) -> HashMap<String, String> {
+// Convert KeyValue iterator to HashMap<String, String> for ClickHouse Map type
+// Made pub(crate) to be accessible from exporter.rs
+pub(crate) fn attributes_to_map<'a>(
+    attrs: impl IntoIterator<Item = &'a KeyValue>,
+) -> HashMap<String, String> {
     attrs
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .into_iter()
+        .map(|kv| (kv.key.to_string(), value_to_string(&kv.value)))
         .collect()
 }
 
-// --- Row Structs Matching Schema ---
-// These structs derive `clickhouse::Row` and `serde::Serialize` for insertion.
-// Field names match the `CREATE TABLE` statements. Use `#[serde(rename = "...")]` if needed.
+// --- ClickHouse Row Structures --- // (Keep #[derive(Row, ...)] as clickhouse-derive handles it)
 
-#[derive(clickhouse::Row, Serialize, Debug, Clone)]
+#[derive(Row, Serialize, Debug, Clone)]
 pub(crate) struct SpanRow {
     #[serde(rename = "Timestamp")]
     timestamp: DateTime<Utc>,
@@ -68,7 +90,7 @@ pub(crate) struct SpanRow {
     #[serde(rename = "SpanName")]
     span_name: String,
     #[serde(rename = "SpanKind")]
-    span_kind: &'static str,
+    span_kind: String,
     #[serde(rename = "ServiceName")]
     service_name: String,
     #[serde(rename = "ResourceAttributes")]
@@ -80,18 +102,18 @@ pub(crate) struct SpanRow {
     #[serde(rename = "SpanAttributes")]
     span_attributes: HashMap<String, String>,
     #[serde(rename = "Duration")]
-    duration: i64, // Nanoseconds
+    duration: i64,
     #[serde(rename = "StatusCode")]
-    status_code: &'static str,
+    status_code: String,
     #[serde(rename = "StatusMessage")]
     status_message: String,
     #[serde(rename = "Events")]
-    events: Vec<EventRow>, // Mapped to Nested structure
+    events: Vec<EventRow>,
     #[serde(rename = "Links")]
-    links: Vec<LinkRow>, // Mapped to Nested structure
+    links: Vec<LinkRow>,
 }
 
-#[derive(clickhouse::Row, Serialize, Debug, Clone)]
+#[derive(Row, Serialize, Debug, Clone)]
 pub(crate) struct EventRow {
     #[serde(rename = "Timestamp")]
     timestamp: DateTime<Utc>,
@@ -101,7 +123,7 @@ pub(crate) struct EventRow {
     attributes: HashMap<String, String>,
 }
 
-#[derive(clickhouse::Row, Serialize, Debug, Clone)]
+#[derive(Row, Serialize, Debug, Clone)]
 pub(crate) struct LinkRow {
     #[serde(rename = "TraceId")]
     trace_id: String,
@@ -113,7 +135,7 @@ pub(crate) struct LinkRow {
     attributes: HashMap<String, String>,
 }
 
-#[derive(clickhouse::Row, Serialize, Debug, Clone)]
+#[derive(Row, Serialize, Debug, Clone)]
 pub(crate) struct ErrorRow {
     #[serde(rename = "Timestamp")]
     timestamp: DateTime<Utc>,
@@ -137,119 +159,117 @@ pub(crate) struct ErrorRow {
 
 // --- Conversion Logic ---
 
-/// Converts a single OTel `SpanData` into rows for ClickHouse tables.
+// Helper to extract service name from resource attributes
+fn get_service_name(resource: &Resource) -> String {
+    resource
+        .get(resource::SERVICE_NAME.into())
+        .map_or_else(|| "unknown_service".to_string(), |v| value_to_string(&v))
+}
+
+// Convert OTel SpanData to ClickHouse rows (SpanRow and potentially ErrorRows)
 pub(crate) fn convert_otel_span_to_rows(
     span_data: &SpanData,
-    resource: &Resource, // Pass resource explicitly for clarity
+    resource: &Resource,
 ) -> (SpanRow, Vec<ErrorRow>) {
-    // Extract common info
-    let trace_id = span_data.span_context.trace_id().to_string();
-    let span_id = span_data.span_context.span_id().to_string();
-    let start_time = system_time_to_chrono_utc(span_data.start_time);
-    let service_name = resource
-        .get(opentelemetry_semantic_conventions::resource::SERVICE_NAME.into())
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "unknown_service".to_string());
+    let service_name = get_service_name(resource);
+    // Pass iterator directly to attributes_to_map
+    let resource_attributes = attributes_to_map(
+        resource
+            .iter()
+            .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+            .collect::<Vec<_>>()
+            .iter(),
+    ); // Need KeyValue, not (&Key, &Value)
+    let span_attributes = attributes_to_map(&span_data.attributes);
 
-    // Prepare nested structures
     let events: Vec<EventRow> = span_data
         .events
         .iter()
         .map(|ev| EventRow {
-            timestamp: system_time_to_chrono_utc(ev.timestamp),
+            timestamp: system_time_to_utc(ev.timestamp),
             name: ev.name.to_string(),
-            attributes: attributes_to_map(&ev.attributes),
+            attributes: attributes_to_map(&ev.attributes), // Pass slice
         })
         .collect();
 
     let links: Vec<LinkRow> = span_data
         .links
         .iter()
-        .map(|link| LinkRow {
-            trace_id: link.span_context().trace_id().to_string(),
-            span_id: link.span_context().span_id().to_string(),
-            trace_state: link.span_context().trace_state().header(),
-            attributes: attributes_to_map(&link.attributes()),
+        .map(|link: &Link| LinkRow {
+            // Use field access, not methods
+            trace_id: link.span_context.trace_id().to_string(),
+            span_id: link.span_context.span_id().to_string(),
+            trace_state: link.span_context.trace_state().header().to_string(),
+            attributes: attributes_to_map(&link.attributes), // Pass slice
         })
         .collect();
 
-    // Calculate duration
-    let duration_nanos = span_data
-        .end_time
-        .duration_since(span_data.start_time)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0) as i64; // Use i64 for ClickHouse Int64
+    let status_message = match &span_data.status {
+        Status::Error { description } => description.to_string(),
+        _ => "".to_string(),
+    };
 
-    // Create the main SpanRow
     let span_row = SpanRow {
-        timestamp: start_time,
-        trace_id: trace_id.clone(), // Clone needed for error rows potentially
-        span_id: span_id.clone(),   // Clone needed for error rows potentially
-        parent_span_id: span_data
-            .parent_span_id
-            .map(|id| id.to_string())
-            .unwrap_or_default(),
-        trace_state: span_data.span_context.trace_state().header(),
+        timestamp: system_time_to_utc(span_data.start_time),
+        trace_id: span_data.span_context.trace_id().to_string(),
+        span_id: span_data.span_context.span_id().to_string(),
+        parent_span_id: span_data.parent_span_id.to_string(), // Use .to_string() directly
+        trace_state: span_data.span_context.trace_state().header().to_string(),
         span_name: span_data.name.to_string(),
-        span_kind: span_kind_to_string(span_data.kind),
-        service_name: service_name.clone(), // Clone needed for error rows
-        resource_attributes: resource
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-        scope_name: span_data.instrumentation_library.name.to_string(),
+        // Use field span_kind instead of kind, pass by reference
+        span_kind: span_kind_to_string(&span_data.span_kind),
+        service_name: service_name.clone(), // Clone service_name for SpanRow
+        resource_attributes,
+        // Use field instrumentation_lib instead of instrumentation_library
+        scope_name: span_data.instrumentation_lib.name.to_string(),
         scope_version: span_data
-            .instrumentation_library
+            .instrumentation_lib
             .version
-            .as_ref()
-            .map(|s| s.to_string())
-            .unwrap_or_default(),
-        span_attributes: attributes_to_map(&span_data.attributes),
-        duration: duration_nanos,
-        status_code: status_code_to_string(span_data.status.code()),
-        status_message: span_data.status.description().to_string(),
+            .map_or("".to_string(), |v| v.to_string()),
+        span_attributes,
+        duration: span_data
+            .end_time
+            .duration_since(span_data.start_time)
+            .map(duration_to_nanos)
+            .unwrap_or(0),
+        status_code: status_code_to_string(&span_data.status),
+        status_message,
         events,
         links,
     };
 
-    // --- Extract Error Events ---
-    // Look for events conventionaly representing exceptions/errors.
+    // Extract error events into ErrorRow (optional)
     let error_rows: Vec<ErrorRow> = span_data
         .events
         .iter()
-        // Check for OTel semantic convention "exception" event name
-        .filter(|ev| ev.name == opentelemetry_semantic_conventions::trace::EXCEPTION_EVENT_NAME)
+        // Use updated semantic conventions path/constant
+        .filter(|ev| ev.name.as_ref() == trace::EXCEPTION_EVENT_NAME.to_string())
         .map(|ev| {
-            let mut error_kind = String::new();
-            let mut error_message = String::new();
-            let mut error_stacktrace = String::new();
+            let mut error_kind = "".to_string();
+            let mut error_message = "".to_string();
+            let mut error_stacktrace = "".to_string();
             let mut error_attributes = HashMap::new();
 
-            // Extract standard exception fields
-            for (key, value) in &ev.attributes {
-                let k = key.as_str();
-                let v = value.to_string(); // Simplify to string for example
-                match k {
-                    opentelemetry_semantic_conventions::trace::EXCEPTION_TYPE => error_kind = v,
-                    opentelemetry_semantic_conventions::trace::EXCEPTION_MESSAGE => {
-                        error_message = v
-                    }
-                    opentelemetry_semantic_conventions::trace::EXCEPTION_STACKTRACE => {
-                        error_stacktrace = v
-                    }
-                    _ => {
-                        // Store other attributes associated with the exception event
-                        error_attributes.insert(k.to_string(), v);
-                    }
+            for kv in &ev.attributes {
+                let key_str = kv.key.as_str();
+                let value_str = value_to_string(&kv.value);
+
+                if key_str == trace::EXCEPTION_TYPE.to_string() {
+                    error_kind = value_str.clone();
+                } else if key_str == trace::EXCEPTION_MESSAGE.to_string() {
+                    error_message = value_str.clone();
+                } else if key_str == trace::EXCEPTION_STACKTRACE.to_string() {
+                    error_stacktrace = value_str.clone();
                 }
+                error_attributes.insert(key_str.to_string(), value_str);
             }
 
             ErrorRow {
-                timestamp: system_time_to_chrono_utc(ev.timestamp),
-                trace_id: trace_id.clone(),            // Use cloned ID
-                span_id: span_id.clone(),              // Use cloned ID
-                service_name: service_name.clone(),    // Use cloned service name
-                span_name: span_data.name.to_string(), // Add span name context
+                timestamp: system_time_to_utc(ev.timestamp),
+                trace_id: span_data.span_context.trace_id().to_string(),
+                span_id: span_data.span_context.span_id().to_string(),
+                service_name: get_service_name(resource),
+                span_name: span_data.name.to_string(),
                 error_kind,
                 error_message,
                 error_stacktrace,

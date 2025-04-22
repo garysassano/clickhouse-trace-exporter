@@ -1,4 +1,9 @@
+use opentelemetry::trace::TraceError;
+use opentelemetry_sdk::export::ExportError;
 use thiserror::Error;
+
+// Use correct crate name: clickhouse
+use clickhouse::error::Error as ClickhouseError;
 
 #[derive(Error, Debug)]
 pub enum ClickhouseExporterError {
@@ -6,10 +11,13 @@ pub enum ClickhouseExporterError {
     UrlParseError(#[from] url::ParseError),
 
     #[error("ClickHouse client error: {0}")]
-    ClickhouseClientError(#[from] clickhouse::error::Error), // Use correct crate name
+    ClickhouseClientError(ClickhouseError),
+
+    #[error("ClickHouse pool error: {0}")]
+    ClickhousePoolError(#[from] ClickhouseError),
 
     #[error("Schema creation failed: {0}")]
-    SchemaCreationError(clickhouse::error::Error), // Use correct crate name
+    SchemaCreationError(ClickhouseError),
 
     #[error("Data conversion error: {0}")]
     ConversionError(String),
@@ -18,10 +26,16 @@ pub enum ClickhouseExporterError {
     MissingConfiguration(String),
 }
 
-// Helper to convert internal errors to OTel ExportError
-impl From<ClickhouseExporterError> for opentelemetry_sdk::export::trace::ExportError {
+// Convert internal errors to OTel ExportError
+impl From<ClickhouseExporterError> for ExportError {
     fn from(e: ClickhouseExporterError) -> Self {
-        // Consider more specific mappings if needed (e.g., transient vs permanent errors)
-        opentelemetry_sdk::export::trace::ExportError::other(e.to_string())
+        ExportError::other(e.to_string())
+    }
+}
+
+// Convert internal errors to OTel TraceError
+impl From<ClickhouseExporterError> for TraceError {
+    fn from(e: ClickhouseExporterError) -> Self {
+        TraceError::ExportError(ExportError::other(e.to_string()))
     }
 }

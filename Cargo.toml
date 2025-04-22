@@ -10,7 +10,7 @@ repository = "" # Optional: Add your repo URL
 opentelemetry = { version = "0.23", features = ["trace"] }
 opentelemetry_sdk = { version = "0.23", features = ["trace", "rt-tokio"] }
 opentelemetry-semantic-conventions = "0.27"
-# Using the correct crate name and version
+# Using the CORRECT crate name: clickhouse
 clickhouse = { version = "0.13", features = ["lz4", "uuid"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 async-trait = "0.1"
@@ -20,6 +20,7 @@ tracing = "0.1" # For internal logging within the exporter
 url = "2.5"
 uuid = { version = "1", features = ["v4"] } # If using UUID type in ClickHouse schema
 chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3" # Added for BoxFuture
 
 [dev-dependencies]
 # Use opentelemetry_api if needed for examples, but opentelemetry itself works too

@@ -709,6 +709,7 @@ dependencies = [
  "chrono",
  "clickhouse",
  "dotenvy",
+ "futures",
  "opentelemetry",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
