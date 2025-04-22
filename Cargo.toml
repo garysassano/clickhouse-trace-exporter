@@ -11,7 +11,7 @@ opentelemetry = { version = "0.23", features = ["trace"] }
 opentelemetry_sdk = { version = "0.23", features = ["trace", "rt-tokio"] }
 opentelemetry-semantic-conventions = "0.27"
 # Using the correct crate name and version
-clickhouse = { version = "0.13", features = ["derive", "lz4", "uuid"] }
+clickhouse = { version = "0.13", features = ["lz4", "uuid"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
