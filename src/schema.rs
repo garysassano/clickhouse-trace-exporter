@@ -1,7 +1,7 @@
 use crate::config::ClickhouseExporterConfig;
 use crate::error::ClickhouseExporterError;
+use clickhouse::Client; // Use Client, not Pool
 use clickhouse::error::Error as ClickhouseError;
-use clickhouse::Pool; // Use correct crate name
 
 // --- SQL Schema Definitions ---
 // NOTE: Carefully review and adjust types (DateTime64 precision, String vs FixedString/UUID, Map types)
@@ -26,17 +26,13 @@ fn get_spans_schema(table_name: &str) -> String {
             Duration Int64,               -- Nanoseconds (signed to match OTel spec possibility)
             StatusCode LowCardinality(String), -- Ok, Error, Unset
             StatusMessage String,
-            Events Nested (                 -- Nested structure for events
-                Timestamp DateTime64(9, 'UTC'),
-                Name String,
-                Attributes Map(LowCardinality(String), String)
-            ),
-            Links Nested (                 -- Nested structure for links
-                TraceId String,
-                SpanId String,
-                TraceState String,
-                Attributes Map(LowCardinality(String), String)
-            ),
+            `Events.Timestamp` Array(DateTime64(9, 'UTC')),
+            `Events.Name` Array(String),
+            `Events.Attributes` Array(Map(LowCardinality(String), String)),
+            `Links.TraceId` Array(String),
+            `Links.SpanId` Array(String),
+            `Links.TraceState` Array(String),
+            `Links.Attributes` Array(Map(LowCardinality(String), String)),
             INDEX idx_trace_id TraceId TYPE bloom_filter GRANULARITY 1,
             INDEX idx_res_attr_key mapKeys(ResourceAttributes) TYPE bloom_filter GRANULARITY 1,
             INDEX idx_span_attr_key mapKeys(SpanAttributes) TYPE bloom_filter GRANULARITY 1,
@@ -78,7 +74,7 @@ fn get_errors_schema(table_name: &str) -> String {
 
 /// Executes `CREATE TABLE IF NOT EXISTS` statements if config.create_schema is true.
 pub(crate) async fn ensure_schema(
-    pool: &Pool, // Use correct crate name (already Pool)
+    client: &Client, // Changed from pool: &Pool
     config: &ClickhouseExporterConfig,
 ) -> Result<(), ClickhouseExporterError> {
     if !config.create_schema {
@@ -87,20 +83,18 @@ pub(crate) async fn ensure_schema(
     }
     tracing::info!("Ensuring ClickHouse schema exists...");
 
-    // Get a client handle from the pool to execute DDL
-    let mut client = pool.get_handle().await.map_err(ClickhouseExporterError::ClickhousePoolError)?;
-
     let spans_sql = get_spans_schema(&config.spans_table_name);
     let errors_sql = get_errors_schema(&config.errors_table_name);
     // let attributes_sql = get_attributes_schema(&config.attributes_table_name); // If using flattened attrs
 
-    // Execute schema creation queries sequentially
+    // Execute schema creation queries sequentially using the passed client
     client
         .query(&spans_sql)
         .execute()
         .await
-        .map_err(|e: ClickhouseError| {
+        .map_err(|e| {
             tracing::error!("Failed to create/check spans table '{}': {}", config.spans_table_name, e);
+            // Assuming ClickhouseError can represent schema errors too
             ClickhouseExporterError::SchemaCreationError(e)
         })?;
     tracing::info!("Checked/Created table: {}", config.spans_table_name);
@@ -109,9 +103,9 @@ pub(crate) async fn ensure_schema(
         .query(&errors_sql)
         .execute()
         .await
-         .map_err(|e: ClickhouseError| {
+         .map_err(|e| {
             tracing::error!("Failed to create/check errors table '{}': {}", config.errors_table_name, e);
-            ClickhouseExporterError::SchemaCreationError(e)
+             ClickhouseExporterError::SchemaCreationError(e)
         })?;
     tracing::info!("Checked/Created table: {}", config.errors_table_name);
 
