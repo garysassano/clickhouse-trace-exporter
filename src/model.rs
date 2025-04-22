@@ -3,10 +3,7 @@ use opentelemetry::{
     trace::{SpanKind, Status},
     KeyValue, Value,
 };
-use opentelemetry_sdk::{
-    trace::{SpanEvents, SpanLinks},
-    Resource,
-};
+use opentelemetry_sdk::trace::{SpanEvents, SpanLinks};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -59,6 +56,7 @@ pub(crate) fn value_to_string(value: &Value) -> String {
         Value::F64(f) => f.to_string(),
         Value::I64(i) => i.to_string(),
         Value::Array(arr) => format!("{:?}", arr), // Basic array formatting
+        _ => String::new(),                        // Or some other default representation
     }
 }
 
@@ -69,13 +67,6 @@ pub(crate) fn attributes_to_map<'a>(
         .into_iter()
         .map(|kv| (kv.key.to_string(), value_to_string(&kv.value)))
         .collect()
-}
-
-pub(crate) fn get_service_name(resource: &Resource) -> String {
-    use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
-    resource
-        .get(SERVICE_NAME.into())
-        .map_or_else(|| "unknown_service".to_string(), |v| value_to_string(&v))
 }
 
 // --- Updated Helper Functions for Nested Types ---
