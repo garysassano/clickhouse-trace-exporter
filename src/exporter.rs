@@ -1,9 +1,10 @@
 use crate::config::ClickhouseExporterConfig;
 use crate::error::ClickhouseExporterError;
-use crate::model::{ErrorRow, SpanRow, convert_otel_span_to_rows};
+use crate::model::{attributes_to_map, ErrorRow, EventRow, LinkRow, SpanRow, convert_otel_span_to_rows};
 use crate::schema;
 use async_trait::async_trait;
-use clickhouse::{Client, Options}; // Use correct crate name
+use clickhouse::Client; // Use correct crate name
+use opentelemetry::trace::TraceError;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::export::trace::{ExportResult, SpanData, SpanExporter};
 use opentelemetry_sdk::resource::ResourceDetector;

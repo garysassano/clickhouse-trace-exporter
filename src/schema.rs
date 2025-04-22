@@ -74,6 +74,7 @@ fn get_errors_schema(table_name: &str) -> String {
     )
 }
 
+
 /// Executes `CREATE TABLE IF NOT EXISTS` statements if config.create_schema is true.
 pub(crate) async fn ensure_schema(
     client: &Client,
@@ -90,24 +91,24 @@ pub(crate) async fn ensure_schema(
     // let attributes_sql = get_attributes_schema(&config.attributes_table_name); // If using flattened attrs
 
     // Execute schema creation queries sequentially
-    client.query(&spans_sql).execute().await.map_err(|e| {
-        tracing::error!(
-            "Failed to create/check spans table '{}': {}",
-            config.spans_table_name,
-            e
-        );
-        ClickhouseExporterError::SchemaCreationError(e)
-    })?;
+    client
+        .query(&spans_sql)
+        .execute()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create/check spans table '{}': {}", config.spans_table_name, e);
+            ClickhouseExporterError::SchemaCreationError(e)
+        })?;
     tracing::info!("Checked/Created table: {}", config.spans_table_name);
 
-    client.query(&errors_sql).execute().await.map_err(|e| {
-        tracing::error!(
-            "Failed to create/check errors table '{}': {}",
-            config.errors_table_name,
-            e
-        );
-        ClickhouseExporterError::SchemaCreationError(e)
-    })?;
+     client
+        .query(&errors_sql)
+        .execute()
+        .await
+         .map_err(|e| {
+            tracing::error!("Failed to create/check errors table '{}': {}", config.errors_table_name, e);
+            ClickhouseExporterError::SchemaCreationError(e)
+        })?;
     tracing::info!("Checked/Created table: {}", config.errors_table_name);
 
     // if config.use_flattened_attributes { // Example condition
