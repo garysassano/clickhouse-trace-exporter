@@ -30,7 +30,7 @@ use std::fmt; // Import fmt for manual Debug impl
 
 // Define a struct that derives `Row` for insertion
 // Ensure field names match the SQL insert columns exactly
-#[derive(clickhouse::Row, Clone, serde::Serialize)] // Removed Debug derive, Added Clone
+#[derive(clickhouse::Row, Clone, serde::Serialize)]
 struct SpanRow {
     // Removed lifetime 'a
     #[serde(rename = "Timestamp")]
@@ -63,10 +63,23 @@ struct SpanRow {
     status_code: String,
     #[serde(rename = "StatusMessage")]
     status_message: String,
-    #[serde(rename = "Events")]
-    events: Vec<crate::schema::EventRow>,
-    #[serde(rename = "Links")]
-    links: Vec<crate::schema::LinkRow>,
+
+    // Uncomment Nested fields and revert attribute types
+    #[serde(rename = "Events.Timestamp")]
+    events_timestamp: Vec<DateTime<Utc>>,
+    #[serde(rename = "Events.Name")]
+    events_name: Vec<String>,
+    #[serde(rename = "Events.Attributes")]
+    events_attributes: Vec<Vec<(String, String)>>,
+
+    #[serde(rename = "Links.TraceId")]
+    links_trace_id: Vec<String>,
+    #[serde(rename = "Links.SpanId")]
+    links_span_id: Vec<String>,
+    #[serde(rename = "Links.TraceState")]
+    links_trace_state: Vec<String>,
+    #[serde(rename = "Links.Attributes")]
+    links_attributes: Vec<Vec<(String, String)>>,
 }
 
 // Add manual Debug impl because clickhouse::Client doesn't implement it
@@ -180,6 +193,11 @@ impl SpanExporter for ClickhouseExporter {
         &self,
         batch: Vec<SpanData>,
     ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+        tracing::info!(
+            "---> export function called with batch size: {}",
+            batch.len()
+        );
+
         // Clone client for the async block.
         // WARNING: Cloning client might not be ideal for performance/safety.
         // Consider Arc<Client> or connection pooling.
@@ -189,6 +207,7 @@ impl SpanExporter for ClickhouseExporter {
 
         Box::pin(async move {
             if batch.is_empty() {
+                tracing::debug!("--> Export batch is empty, returning Ok.");
                 return Ok(());
             }
             let batch_size = batch.len();
@@ -202,11 +221,38 @@ impl SpanExporter for ClickhouseExporter {
                 for span_data in &batch {
                     let scope = &span_data.instrumentation_scope;
 
-                    let resource_attrs: Vec<(String, String)> = Vec::new(); // Placeholder for resource attrs
-                    let span_attrs = attributes_to_vec(&span_data.attributes);
+                    // Get attributes as Vec<(String, String)> first
+                    let resource_attrs_vec: Vec<(String, String)> = Vec::new(); // Placeholder for resource attrs
+                    let span_attrs_vec = attributes_to_vec(&span_data.attributes);
 
-                    let events = convert_events(&span_data.events);
-                    let links = convert_links(&span_data.links);
+                    // Re-enable Nested processing
+                    // Get structured Events and Links data
+                    let events_data = convert_events(&span_data.events);
+                    let links_data = convert_links(&span_data.links);
+
+                    // --- Flatten Nested types --- Start ---
+                    let mut events_timestamp = Vec::with_capacity(events_data.len());
+                    let mut events_name = Vec::with_capacity(events_data.len());
+                    let mut events_attributes = Vec::with_capacity(events_data.len()); // Now Vec<Vec<(String, String)>>
+                    for event in events_data {
+                        events_timestamp.push(event.timestamp);
+                        events_name.push(event.name);
+                        // Push the Vec<(String, String)> directly
+                        events_attributes.push(event.attributes);
+                    }
+
+                    let mut links_trace_id = Vec::with_capacity(links_data.len());
+                    let mut links_span_id = Vec::with_capacity(links_data.len());
+                    let mut links_trace_state = Vec::with_capacity(links_data.len());
+                    let mut links_attributes = Vec::with_capacity(links_data.len()); // Now Vec<Vec<(String, String)>>
+                    for link in links_data {
+                        links_trace_id.push(link.trace_id);
+                        links_span_id.push(link.span_id);
+                        links_trace_state.push(link.trace_state);
+                        // Push the Vec<(String, String)> directly
+                        links_attributes.push(link.attributes);
+                    }
+                    // --- Flatten Nested types --- End ----
 
                     let status_message = match &span_data.status {
                         opentelemetry::trace::Status::Error { description } => {
@@ -230,20 +276,26 @@ impl SpanExporter for ClickhouseExporter {
                         span_name: span_data.name.to_string(),
                         span_kind: span_kind_to_string(&span_data.span_kind),
                         service_name: service_name.clone(),
-                        resource_attributes: resource_attrs,
-                        scope_name: scope.name().to_string(), // Use name() method
-                        scope_version: scope.version().as_deref().map_or("", |v| v).to_string(), // Use version() method
-                        span_attributes: span_attrs,
+                        resource_attributes: resource_attrs_vec,
+                        scope_name: scope.name().to_string(),
+                        scope_version: scope.version().as_deref().map_or("", |v| v).to_string(),
+                        span_attributes: span_attrs_vec,
                         duration: duration_ns,
                         status_code: status_code_to_string(&span_data.status),
                         status_message,
-                        events,
-                        links,
+                        events_timestamp,
+                        events_name,
+                        events_attributes,
+                        links_trace_id,
+                        links_span_id,
+                        links_trace_state,
+                        links_attributes,
                     };
 
+                    // Check write result explicitly if needed, though panics are more likely here
                     insert.write(&row).await.map_err(|e| {
                         tracing::error!(
-                            "Failed preparing span {} for ClickHouse batch insert: {}",
+                            "Error during insert.write for span {}: {:?}",
                             row.span_id,
                             e
                         );
@@ -251,14 +303,20 @@ impl SpanExporter for ClickhouseExporter {
                     })?;
                 }
 
-                insert.end().await.map_err(|e| {
-                    tracing::error!("Failed executing ClickHouse batch insert: {}", e);
-                    ClickhouseExporterError::ClickhouseClientError(e)
-                })?;
-
-                Ok::<(), ClickhouseExporterError>(())
+                // Explicitly check end() result
+                match insert.end().await {
+                    Ok(_) => {
+                        tracing::debug!("Insert finished successfully.");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        tracing::error!("Error during insert.end: {:?}", e);
+                        // Return the error wrapped in the custom error type
+                        Err(ClickhouseExporterError::ClickhouseClientError(e))
+                    }
+                }
             }
-            .await;
+            .await; // Await the inner async block result
 
             // Map internal Result to OTelSdkResult
             match insert_result {
@@ -272,6 +330,8 @@ impl SpanExporter for ClickhouseExporter {
                     Ok(())
                 }
                 Err(e) => {
+                    // Log the specific error before converting
+                    tracing::error!("Export failed with error: {:?}", e);
                     // Convert internal error to OTelSdkError::Other
                     Err(OTelSdkError::InternalFailure(e.to_string()))
                 }

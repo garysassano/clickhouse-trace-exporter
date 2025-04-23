@@ -7,10 +7,11 @@ use opentelemetry_clickhouse_exporter::{
 use opentelemetry_sdk::{resource::Resource, trace as sdktrace};
 use std::env;
 use std::time::Duration;
+use tracing_subscriber::fmt;
 
 fn init_tracer(
     config: ClickhouseExporterConfig,
-) -> Result<sdktrace::Tracer, Box<dyn std::error::Error>> {
+) -> Result<(sdktrace::Tracer, sdktrace::SdkTracerProvider), Box<dyn std::error::Error>> {
     opentelemetry::global::set_text_map_propagator(
         opentelemetry_sdk::propagation::TraceContextPropagator::new(),
     );
@@ -31,17 +32,20 @@ fn init_tracer(
         .with_resource(resource)
         .build();
 
-    // Create a tracer
+    // Create a tracer from the provider
     let tracer = provider.tracer("my-app-example");
 
-    // Set as global provider
-    global::set_tracer_provider(provider);
+    // DO NOT set as global provider here if we manage lifecycle manually
+    // global::set_tracer_provider(provider);
 
-    Ok(tracer)
+    Ok((tracer, provider)) // Return both tracer and provider
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing subscriber
+    fmt::init();
+
     // Load DSN from environment or use default
     let clickhouse_dsn = env::var("CLICKHOUSE_DSN")
         .unwrap_or_else(|_| "tcp://localhost:9000?compression=lz4".to_string());
@@ -51,8 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_schema_creation(true) // Ensure tables are created if they don't exist
         .with_spans_table("otel_spans_example"); // Use specific table names for the example
 
-    // Initialize the tracer
-    let tracer = init_tracer(exporter_config)?;
+    // Initialize the tracer and get the provider instance
+    let (tracer, provider) = init_tracer(exporter_config)?; // Get both
 
     // -- Example Trace Start --
 
@@ -120,6 +124,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -- Example Trace End --
 
     println!("Trace finished. Check your ClickHouse `otel_spans_example` table.");
-    // No explicit shutdown needed for simple exporter; spans have been exported synchronously
+
+    // Explicitly flush and shut down the specific provider instance
+    provider.force_flush()?; // Force export of any remaining spans
+    provider.shutdown()?; // Shut down the exporter
+
     Ok(())
 }
